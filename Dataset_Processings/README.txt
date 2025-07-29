@@ -1,1 +1,0 @@
-Codes related to processing the initial data to prepare the dataset that will be uset to train the AI.

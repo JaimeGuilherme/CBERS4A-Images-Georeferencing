@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch model weights
+*.pth
+
+# Environment files
+.env
+.venv/
+venv/
+env/
+*.env
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Raster/Vector temp files
+*.aux.xml
+*.tif.ovr
+*.gpkg-shm
+*.gpkg-wal
