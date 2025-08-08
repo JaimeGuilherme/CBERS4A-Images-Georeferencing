@@ -8,7 +8,8 @@ import geopandas as gpd
 from scipy.ndimage import label, center_of_mass
 from dataset import RoadIntersectionDataset
 from unet import UNet
-from utils import load_model
+from utils import load_checkpoint
+import rasterio
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -35,20 +36,42 @@ def inferir_modelos_multiplos(modelos, dataloader, device, threshold=0.5):
 
     return resultados
 
-def extrair_pontos_com_patches(preds_binarias, nomes_patches):
+def extrair_pontos_com_patches(preds_binarias, nomes_patches, patch_offsets, transform, crs=None):
     dados = []
-    for pred, patch_name in zip(preds_binarias, nomes_patches):
-        mask = pred[0].astype(np.uint8)  # remove canal
+    for pred, patch_name, (x_offset, y_offset) in zip(preds_binarias, nomes_patches, patch_offsets):
+        mask = pred.squeeze().astype(np.uint8)  # garante 2D
+
         labeled, num_features = label(mask)
         centros = center_of_mass(mask, labeled, range(1, num_features + 1))
 
-        for y, x in centros:
+        for centro in centros:
+            if len(centro) != 2:
+                continue
+
+            y, x = centro
             if np.isnan(x) or np.isnan(y):
                 continue
-            ponto = Point(int(round(x)), int(round(y)))
+
+            # Coordenadas absolutas na imagem
+            abs_x = x_offset + x
+            abs_y = y_offset + y
+
+            # Coordenadas geográficas (lon, lat)
+            lon, lat = rasterio.transform.xy(transform, abs_y, abs_x)
+
+            ponto = Point(lon, lat)
             dados.append({'geometry': ponto, 'patch': patch_name})
 
-    return gpd.GeoDataFrame(dados)
+    print(f"[DEBUG] Total pontos detectados: {len(dados)}")
+    if dados:
+        print(f"[DEBUG] Exemplo ponto: {dados[0]}")
+
+    gdf = gpd.GeoDataFrame(dados)
+    gdf = gdf.set_geometry('geometry')
+    if crs:
+        gdf.set_crs(crs, inplace=True)
+
+    return gdf
 
 if __name__ == "__main__":
     caminho_modelos = sorted([os.path.join("checkpoints", f) for f in os.listdir("checkpoints") if f.endswith(".pth")])
@@ -58,22 +81,39 @@ if __name__ == "__main__":
     threshold = 0.5
     caminho_saida_geojson = "resultados/pontos_detectados.geojson"
 
-    test_dataset = RoadIntersectionDataset(caminho_test_img, caminho_test_mask, overlap=0.3)
+    # Carregar transform e crs da primeira imagem para usar nas coordenadas geográficas
+    primeira_imagem_path = os.path.join(caminho_test_img, sorted(os.listdir(caminho_test_img))[0])
+    with rasterio.open(primeira_imagem_path) as src:
+        transform = src.transform
+        crs = src.crs
+
+    test_dataset = RoadIntersectionDataset(caminho_test_img, caminho_test_mask)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # Calcular offsets dos patches pela posição do arquivo (extraindo índice do nome do patch)
+    nomes_patches = sorted([f for f in os.listdir(caminho_test_img) if f.endswith(".tif")])
+    patch_offsets = []
+    for nome in nomes_patches:
+        # Exemplo nome patch_0292.tif
+        idx_str = nome.split("_")[1].split(".")[0]
+        idx = int(idx_str)
+        step = 256
+        x_offset = (idx % 50) * step  # ajusta 50 conforme sua organização
+        y_offset = (idx // 50) * step
+        patch_offsets.append((x_offset, y_offset))
 
     modelos = []
     print("📦 Carregando modelos:")
     for caminho_modelo in caminho_modelos:
         print(f" - {os.path.basename(caminho_modelo)}")
         model = UNet(in_channels=3, out_channels=1).to(DEVICE)
-        load_model(model, caminho_modelo)
+        load_checkpoint(caminho_modelo, model)
         modelos.append(model)
 
     print("\n🚀 Inferindo média dos modelos...")
     resultados_binarios = inferir_modelos_multiplos(modelos, test_loader, DEVICE, threshold=threshold)
 
-    nomes_patches = sorted([f for f in os.listdir(caminho_test_img) if f.endswith(".tif")])
-    gdf_pontos = extrair_pontos_com_patches(resultados_binarios, nomes_patches)
+    gdf_pontos = extrair_pontos_com_patches(resultados_binarios, nomes_patches, patch_offsets, transform, crs)
 
     os.makedirs(os.path.dirname(caminho_saida_geojson), exist_ok=True)
     gdf_pontos.to_file(caminho_saida_geojson, driver='GeoJSON')

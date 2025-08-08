@@ -27,9 +27,17 @@ def reconstruct_coords_from_patch(px, py, transform):
 # Carregar modelo salvo do último checkpoint
 def load_checkpoint(caminho, model, optimizer=None):
     checkpoint = torch.load(caminho, map_location=torch.device('cpu'))
-    model.load_state_dict(checkpoint['model_state_dict'])
-    if optimizer and 'optimizer_state_dict' in checkpoint:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    epoch = checkpoint.get('epoch', 0)
-    best_iou = checkpoint.get('best_iou', 0.0)
+
+    # Verifica se o arquivo é só o state_dict puro
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+        if optimizer and 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        epoch = checkpoint.get('epoch', 0)
+        best_iou = checkpoint.get('best_iou', 0.0)
+    else:
+        model.load_state_dict(checkpoint)
+        epoch = 0
+        best_iou = 0.0
+
     return {'epoch': epoch, 'best_iou': best_iou}

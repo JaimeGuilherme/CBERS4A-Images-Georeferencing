@@ -1,96 +1,48 @@
-import os
-import torch
-import numpy as np
-import rasterio
 import geopandas as gpd
-from torchvision import transforms
-from torch.utils.data import DataLoader, Dataset
-from PIL import Image
-from skimage import measure
 from shapely.geometry import Point
+from sklearn.neighbors import NearestNeighbors
+import os
 
-# Define patch size
-PATCH_SIZE = 256
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def associar_pontos(detectados_path, originais_path, output_path):
+    # Carrega pontos detectados e pontos originais
+    gdf_detectados = gpd.read_file(detectados_path)
+    gdf_originais = gpd.read_file(originais_path)
 
-# Dataset for sliding window inference
-class SlidingWindowDataset(Dataset):
-    def __init__(self, image_array, step=PATCH_SIZE):
-        self.image = image_array
-        self.step = step
-        self.patches = []
-        self.coords = []
-        h, w, _ = image_array.shape
-        for y in range(0, h - PATCH_SIZE + 1, step):
-            for x in range(0, w - PATCH_SIZE + 1, step):
-                patch = image_array[y:y + PATCH_SIZE, x:x + PATCH_SIZE]
-                self.patches.append(patch)
-                self.coords.append((x, y))
+    # Ajusta CRS caso sejam diferentes
+    if gdf_detectados.crs != gdf_originais.crs:
+        gdf_detectados = gdf_detectados.to_crs(gdf_originais.crs)
 
-        self.transform = transforms.Compose([
-            transforms.ToTensor()
-        ])
+    coords_detectados = [[p.x, p.y] for p in gdf_detectados.geometry]
+    coords_originais = [[p.x, p.y] for p in gdf_originais.geometry]
 
-    def __len__(self):
-        return len(self.patches)
+    # Cria modelo de vizinho mais próximo
+    nn = NearestNeighbors(n_neighbors=1, algorithm='ball_tree')
+    nn.fit(coords_originais)
 
-    def __getitem__(self, idx):
-        patch = self.patches[idx]
-        x, y = self.coords[idx]
-        return self.transform(patch), (x, y)
+    # Para cada ponto detectado, acha o índice do ponto original mais próximo
+    distancias, indices = nn.kneighbors(coords_detectados)
 
-def predict_intersections(image_path, model_path, output_geojson):
-    # Load image
-    with rasterio.open(image_path) as src:
-        image = src.read([1, 2, 3])  # RGB
-        image = np.moveaxis(image, 0, -1)
-        transform = src.transform
-        crs = src.crs
+    # Monta lista de pares homólogos
+    pares = []
+    for i, (dist, idx) in enumerate(zip(distancias[:, 0], indices[:, 0])):
+        pares.append({
+            'geometry': gdf_detectados.geometry.iloc[i],
+            'id_detectado': i,
+            'id_original': idx,
+            'distancia': dist
+        })
 
-    # Normalize image
-    image = image.astype(np.uint8)
+    # Cria GeoDataFrame com os pares associados
+    gdf_pares = gpd.GeoDataFrame(pares, crs=gdf_detectados.crs)
 
-    # Load model
-    model = torch.load(model_path, map_location=DEVICE)
-    model.eval()
-
-    # Dataset and loader
-    dataset = SlidingWindowDataset(image)
-    loader = DataLoader(dataset, batch_size=1, shuffle=False)
-
-    # Collect predicted intersection points
-    detected_points = []
-
-    for inputs, (x_offset, y_offset) in loader:
-        inputs = inputs.to(DEVICE)
-        with torch.no_grad():
-            output = model(inputs)
-            mask_pred = (output > 0.5).float().cpu().numpy()[0, 0]
-
-        # Detect connected components (blobs)
-        labeled = measure.label(mask_pred)
-        props = measure.regionprops(labeled)
-
-        for prop in props:
-            # Get centroid in patch
-            cy, cx = prop.centroid
-            # Convert to image coordinates
-            abs_x = x_offset.item() + int(cx)
-            abs_y = y_offset.item() + int(cy)
-
-            # Convert to geographic coordinates
-            lon, lat = rasterio.transform.xy(transform, abs_y, abs_x)
-            detected_points.append(Point(lon, lat))
-
-    # Save as GeoJSON
-    gdf = gpd.GeoDataFrame(geometry=detected_points, crs=crs)
-    gdf.to_file(output_geojson, driver="GeoJSON")
-    print(f"[✔] {len(detected_points)} pontos detectados salvos em: {output_geojson}")
+    # Salva resultado para uso no QGIS
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    gdf_pares.to_file(output_path, driver="GeoJSON")
+    print(f"[✔] {len(gdf_pares)} pares homólogos salvos em: {output_path}")
 
 if __name__ == "__main__":
-    # Exemplo de uso
-    image_path = "05_plugin_georref/imagem_nova.tif"
-    model_path = "02_train_model/model_final.pth"
-    output_geojson = "05_plugin_georref/pontos_detectados.geojson"
+    detectados_path = "resultados/pontos_detectados.geojson"
+    originais_path = "input/intersecoes_osm.gpkg"
+    output_path = "resultados/pontos_homologos.geojson"
 
-    predict_intersections(image_path, model_path, output_geojson)
+    associar_pontos(detectados_path, originais_path, output_path)
