@@ -49,7 +49,7 @@ if __name__ == "__main__":
     caminho_test_mask = "dataset/test/masks"
     caminho_checkpoint = "checkpoints"
     epocas = 50
-    batch = 8
+    batch = 4
     salvar_checkpoint_a_cada = 5  # salva checkpoint a cada 5 épocas
 
     os.makedirs(caminho_checkpoint, exist_ok=True)

@@ -4,7 +4,7 @@ def save_model(model, path):
 def load_checkpoint(caminho, model, optimizer=None):
     if not os.path.exists(caminho):
         raise FileNotFoundError(caminho)
-    checkpoint = torch.load(caminho, map_location='cpu')
+    checkpoint = torch.load(caminho, map_location='cpu', weights_only=False)  # <--- aqui
     if 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
