@@ -1,48 +1,26 @@
-import geopandas as gpd
-from shapely.geometry import Point
+import os, geopandas as gpd
 from sklearn.neighbors import NearestNeighbors
-import os
+import numpy as np
 
-def associar_pontos(detectados_path, originais_path, output_path):
-    # Carrega pontos detectados e pontos originais
-    gdf_detectados = gpd.read_file(detectados_path)
-    gdf_originais = gpd.read_file(originais_path)
-
-    # Ajusta CRS caso sejam diferentes
-    if gdf_detectados.crs != gdf_originais.crs:
-        gdf_detectados = gdf_detectados.to_crs(gdf_originais.crs)
-
-    coords_detectados = [[p.x, p.y] for p in gdf_detectados.geometry]
-    coords_originais = [[p.x, p.y] for p in gdf_originais.geometry]
-
-    # Cria modelo de vizinho mais próximo
-    nn = NearestNeighbors(n_neighbors=1, algorithm='ball_tree')
-    nn.fit(coords_originais)
-
-    # Para cada ponto detectado, acha o índice do ponto original mais próximo
-    distancias, indices = nn.kneighbors(coords_detectados)
-
-    # Monta lista de pares homólogos
+def associar_pontos(pontos_detectados_path, pontos_osm_path, output_path, max_distance=20):
+    detectados = gpd.read_file(pontos_detectados_path)
+    osm = gpd.read_file(pontos_osm_path)
+    if detectados.crs != osm.crs:
+        detectados = detectados.to_crs(osm.crs)
+    coords_detect = np.array([(geom.x, geom.y) for geom in detectados.geometry])
+    coords_osm = np.array([(geom.x, geom.y) for geom in osm.geometry])
+    if len(coords_detect)==0 or len(coords_osm)==0:
+        print('Nenhum ponto para associar.'); return
+    nbrs = NearestNeighbors(n_neighbors=1).fit(coords_osm)
+    distances, indices = nbrs.kneighbors(coords_detect)
     pares = []
-    for i, (dist, idx) in enumerate(zip(distancias[:, 0], indices[:, 0])):
-        pares.append({
-            'geometry': gdf_detectados.geometry.iloc[i],
-            'id_detectado': i,
-            'id_original': idx,
-            'distancia': dist
-        })
+    for i, (dist, idx) in enumerate(zip(distances.flatten(), indices.flatten())):
+        if dist <= max_distance:
+            pares.append({'id_detectado': int(detectados.index[i]), 'id_osm': int(osm.index[idx]), 'distancia': float(dist), 'geometry_detectado': detectados.geometry.iloc[i], 'geometry_osm': osm.geometry.iloc[idx]})
+    gdf_pares = gpd.GeoDataFrame(pares, geometry='geometry_detectado', crs=osm.crs)
+    gdf_pares.to_file(output_path, driver='GeoJSON')
+    print('Pares salvos em', output_path, 'total:', len(pares))
 
-    # Cria GeoDataFrame com os pares associados
-    gdf_pares = gpd.GeoDataFrame(pares, crs=gdf_detectados.crs)
-
-    # Salva resultado para uso no QGIS
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    gdf_pares.to_file(output_path, driver="GeoJSON")
-    print(f"[✔] {len(gdf_pares)} pares homólogos salvos em: {output_path}")
-
-if __name__ == "__main__":
-    detectados_path = "resultados/pontos_detectados.geojson"
-    originais_path = "input/intersecoes_osm.gpkg"
-    output_path = "resultados/pontos_homologos.geojson"
-
-    associar_pontos(detectados_path, originais_path, output_path)
+if __name__ == '__main__':
+    os.makedirs('resultados', exist_ok=True)
+    associar_pontos('resultados/pontos_detectados.geojson', 'input/intersecoes_osm.gpkg', 'resultados/pares_homologos.geojson')

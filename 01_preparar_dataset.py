@@ -4,13 +4,12 @@ import random
 import numpy as np
 import rasterio
 from rasterio.windows import Window
-from rasterio.transform import Affine
-from rasterio.enums import Resampling
-from rasterio import uint8
 from pyproj import Transformer
+import math
 import fiona
+from tqdm import tqdm
 
-def criar_mascara(points, img_width, img_height, buffer_pixels=3):
+def criar_mascara(points, img_width, img_height, buffer_pixels=6):
     from PIL import Image, ImageDraw
     mask = Image.new('L', (img_width, img_height), 0)
     draw = ImageDraw.Draw(mask)
@@ -22,10 +21,8 @@ def criar_mascara(points, img_width, img_height, buffer_pixels=3):
 
     return np.array(mask) > 0
 
-def carregar_pontos_bufferados(arquivo_pontos, transform, img_width, img_height, buffer_pixels=3, img_crs_epsg=32724):
+def carregar_pontos_bufferados(arquivo_pontos, transform, img_width, img_height, buffer_pixels=6, img_crs_epsg=32724):
     points_px = []
-
-    # Cria transformador de WGS84 (EPSG:4326) para o CRS da imagem
     transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{img_crs_epsg}", always_xy=True)
 
     with fiona.open(arquivo_pontos, 'r') as src:
@@ -34,8 +31,8 @@ def carregar_pontos_bufferados(arquivo_pontos, transform, img_width, img_height,
             if geom['type'] != 'Point':
                 continue
             lon, lat = geom['coordinates']
-            x_m, y_m = transformer.transform(lon, lat)  # reprojeta p/ metros
-            px, py = ~transform * (x_m, y_m)            # reprojeta p/ pixel
+            x_m, y_m = transformer.transform(lon, lat)
+            px, py = ~transform * (x_m, y_m)
             px, py = int(px), int(py)
             if 0 <= px < img_width and 0 <= py < img_height:
                 points_px.append((px, py))
@@ -43,8 +40,7 @@ def carregar_pontos_bufferados(arquivo_pontos, transform, img_width, img_height,
 
 def salvar_tif(path, array, count, height, width, transform, crs):
     with rasterio.open(
-        path,
-        'w',
+        path, 'w',
         driver='GTiff',
         height=height,
         width=width,
@@ -57,13 +53,10 @@ def salvar_tif(path, array, count, height, width, transform, crs):
 
 def separar_patches(patches_dir, output_dir, train_pct=0.6, val_pct=0.3, test_pct=0.1, seed=42):
     random.seed(seed)
-
     images_path = os.path.join(patches_dir, 'images')
     masks_path = os.path.join(patches_dir, 'masks')
-
     imagens = sorted(os.listdir(images_path))
     mascaras = sorted(os.listdir(masks_path))
-
     assert len(imagens) == len(mascaras), "Número de imagens e máscaras não bate"
 
     for split in ['train', 'val', 'test']:
@@ -73,7 +66,6 @@ def separar_patches(patches_dir, output_dir, train_pct=0.6, val_pct=0.3, test_pc
     total = len(imagens)
     train_end = int(total * train_pct)
     val_end = train_end + int(total * val_pct)
-
     indices = list(range(total))
     random.shuffle(indices)
 
@@ -87,34 +79,43 @@ def separar_patches(patches_dir, output_dir, train_pct=0.6, val_pct=0.3, test_pc
 
         img_name = imagens[idx]
         mask_name = mascaras[idx]
-
         shutil.copy(os.path.join(images_path, img_name), os.path.join(output_dir, split, 'images', img_name))
         shutil.copy(os.path.join(masks_path, mask_name), os.path.join(output_dir, split, 'masks', mask_name))
 
     print(f"Distribuição concluída:\n Treino: {train_end}\n Validação: {val_end - train_end}\n Teste: {total - val_end}")
 
-def gerar_patches_com_buffer(imagem_path, pontos_path, saida_path, patch_size=256, buffer_pixels=3):
+def gerar_patches_com_buffer(imagem_path, pontos_path, saida_path, patch_size=256, buffer_pixels=6, limite_patches=None):
     os.makedirs(os.path.join(saida_path, 'images'), exist_ok=True)
     os.makedirs(os.path.join(saida_path, 'masks'), exist_ok=True)
 
     with rasterio.open(imagem_path) as src:
         transform = src.transform
-        crs = src.crs  # 👈 Pega o CRS da imagem original
+        crs = src.crs
         img_width = src.width
         img_height = src.height
-
         points_px = carregar_pontos_bufferados(pontos_path, transform, img_width, img_height, buffer_pixels)
 
-        print(f"Total pontos dentro da imagem (em pixel): {len(points_px)}")
+        print(f"Total pontos dentro da imagem: {len(points_px)}")
 
         patch_id = 0
-        for top in range(0, img_height, patch_size):
-            for left in range(0, img_width, patch_size):
+
+        rows = math.ceil(img_height / patch_size)
+
+        for row_idx, top in enumerate(tqdm(range(0, img_height, patch_size), desc="Gerando patches", total=rows)):
+            for col_idx, left in enumerate(range(0, img_width, patch_size)):
                 width = min(patch_size, img_width - left)
                 height = min(patch_size, img_height - top)
 
+                patch_points = [
+                    (px - left, py - top)
+                    for (px, py) in points_px
+                    if left <= px < left + width and top <= py < top + height
+                ]
+                if not patch_points:
+                    continue  # pula patch sem pontos
+
                 window = Window(left, top, width, height)
-                patch = src.read(window=window)  # shape: (bands, height, width)
+                patch = src.read(window=window)
 
                 patch_img = patch.astype(np.float32)
                 patch_img -= patch_img.min()
@@ -128,58 +129,30 @@ def gerar_patches_com_buffer(imagem_path, pontos_path, saida_path, patch_size=25
                 elif patch_img.shape[0] > 3:
                     patch_img = patch_img[:3]
 
-                patch_points = []
-                for (px, py) in points_px:
-                    if left <= px < left + width and top <= py < top + height:
-                        patch_points.append((px - left, py - top))
-
-                if len(patch_points) == 0:
-                    continue
-
                 mask = criar_mascara(patch_points, width, height, buffer_pixels)
                 mask_uint8 = (mask * 255).astype(np.uint8).reshape(1, height, width)
 
                 patch_transform = src.window_transform(window)
 
                 img_filename = f"patch_{patch_id:04d}.tif"
-                salvar_tif(
-                    os.path.join(saida_path, 'images', img_filename),
-                    patch_img,
-                    count=3,
-                    height=height,
-                    width=width,
-                    transform=patch_transform,
-                    crs=crs  # 👈 CRS herdado da imagem
-                )
-
-                salvar_tif(
-                    os.path.join(saida_path, 'masks', img_filename),
-                    mask_uint8,
-                    count=1,
-                    height=height,
-                    width=width,
-                    transform=patch_transform,
-                    crs=crs  # 👈 CRS herdado da imagem
-                )
+                salvar_tif(os.path.join(saida_path, 'images', img_filename), patch_img, 3, height, width, patch_transform, crs)
+                salvar_tif(os.path.join(saida_path, 'masks', img_filename), mask_uint8, 1, height, width, patch_transform, crs)
 
                 patch_id += 1
+                if limite_patches and patch_id >= limite_patches:
+                    print(f"⚡ Limite de {limite_patches} patches atingido.")
+                    break
+            if limite_patches and patch_id >= limite_patches:
+                break
 
         print(f"Patches gerados: {patch_id}")
 
-    print("\nSeparando dataset em treino, validação e teste (60/30/10)...")
-    separar_patches(
-        patches_dir=saida_path,
-        output_dir="dataset",
-        train_pct=0.6,
-        val_pct=0.3,
-        test_pct=0.1,
-        seed=42
-    )
-    print("✅ Preparação do dataset finalizada. Diretórios criados em 'dataset/'")
+    print("\nSeparando dataset em treino, validação e teste...")
+    separar_patches(saida_path, "dataset", 0.6, 0.3, 0.1, 42)
+    print("✅ Dataset pronto.")
 
 if __name__ == "__main__":
     caminho_imagem = "input/imagem_georreferenciada.tif"
     caminho_pontos = "input/intersecoes_osm.gpkg"
     caminho_saida = "dataset_patches"
-
-    gerar_patches_com_buffer(caminho_imagem, caminho_pontos, caminho_saida)
+    gerar_patches_com_buffer(caminho_imagem, caminho_pontos, caminho_saida, limite_patches=100)

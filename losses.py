@@ -17,12 +17,9 @@ class FocalLoss(nn.Module):
         self.gamma = gamma
 
     def forward(self, inputs, targets):
-        # inputs are raw logits, so apply sigmoid first
         prob = torch.sigmoid(inputs)
         ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
-
         p_t = prob * targets + (1 - prob) * (1 - targets)
         focal_factor = (1 - p_t) ** self.gamma
-
         loss = self.alpha * focal_factor * ce_loss
         return loss.mean()

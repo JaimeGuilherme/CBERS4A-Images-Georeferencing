@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 class DoubleConv(nn.Module):
     def __init__(self, in_ch, out_ch):
@@ -34,7 +33,6 @@ class UNet(nn.Module):
         self.conv_last = nn.Conv2d(64, out_channels, 1)
 
     def forward(self, x):
-        # Encoder
         conv1 = self.dconv_down1(x)
         x = self.maxpool(conv1)
 
@@ -46,7 +44,6 @@ class UNet(nn.Module):
 
         x = self.dconv_down4(x)
 
-        # Decoder
         x = self.upsample(x)
         x = torch.cat([x, conv3], dim=1)
 
