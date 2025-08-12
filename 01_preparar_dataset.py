@@ -5,10 +5,15 @@ import numpy as np
 import rasterio
 from rasterio.windows import Window
 from pyproj import Transformer
+import math
 import fiona
 from tqdm import tqdm
 
+<<<<<<< Updated upstream
 def criar_mascara(points, img_width, img_height, buffer_pixels=8):
+=======
+def criar_mascara(points, img_width, img_height, buffer_pixels=6):
+>>>>>>> Stashed changes
     from PIL import Image, ImageDraw
     mask = Image.new('L', (img_width, img_height), 0)
     draw = ImageDraw.Draw(mask)
@@ -20,7 +25,11 @@ def criar_mascara(points, img_width, img_height, buffer_pixels=8):
 
     return np.array(mask) > 0
 
+<<<<<<< Updated upstream
 def carregar_pontos_bufferados(arquivo_pontos, transform, img_width, img_height, buffer_pixels=8, img_crs_epsg=32724):
+=======
+def carregar_pontos_bufferados(arquivo_pontos, transform, img_width, img_height, buffer_pixels=6, img_crs_epsg=32724):
+>>>>>>> Stashed changes
     points_px = []
     transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{img_crs_epsg}", always_xy=True)
 
@@ -83,7 +92,11 @@ def separar_patches(patches_dir, output_dir, train_pct=0.6, val_pct=0.3, test_pc
 
     print(f"Distribuição concluída:\n Treino: {train_end}\n Validação: {val_end - train_end}\n Teste: {total - val_end}")
 
+<<<<<<< Updated upstream
 def gerar_patches_com_buffer(imagem_path, pontos_path, saida_path, patch_size=256, buffer_pixels=8, limite_patches=None):
+=======
+def gerar_patches_com_buffer(imagem_path, pontos_path, saida_path, patch_size=256, buffer_pixels=6, limite_patches=None):
+>>>>>>> Stashed changes
     os.makedirs(os.path.join(saida_path, 'images'), exist_ok=True)
     os.makedirs(os.path.join(saida_path, 'masks'), exist_ok=True)
 
@@ -97,6 +110,7 @@ def gerar_patches_com_buffer(imagem_path, pontos_path, saida_path, patch_size=25
         print(f"Total pontos dentro da imagem: {len(points_px)}")
 
         patch_id = 0
+<<<<<<< Updated upstream
         total_iter = (img_height // patch_size + 1) * (img_width // patch_size + 1)
 
         for top in tqdm(range(0, img_height, patch_size), desc="Gerando patches", total=img_height // patch_size + 1):
@@ -105,6 +119,21 @@ def gerar_patches_com_buffer(imagem_path, pontos_path, saida_path, patch_size=25
                 height = min(patch_size, img_height - top)
 
                 patch_points = [(px - left, py - top) for (px, py) in points_px if left <= px < left + width and top <= py < top + height]
+=======
+
+        rows = math.ceil(img_height / patch_size)
+
+        for row_idx, top in enumerate(tqdm(range(0, img_height, patch_size), desc="Gerando patches", total=rows)):
+            for col_idx, left in enumerate(range(0, img_width, patch_size)):
+                width = min(patch_size, img_width - left)
+                height = min(patch_size, img_height - top)
+
+                patch_points = [
+                    (px - left, py - top)
+                    for (px, py) in points_px
+                    if left <= px < left + width and top <= py < top + height
+                ]
+>>>>>>> Stashed changes
                 if not patch_points:
                     continue  # pula patch sem pontos
 
@@ -149,4 +178,8 @@ if __name__ == "__main__":
     caminho_imagem = "input/imagem_georreferenciada.tif"
     caminho_pontos = "input/intersecoes_osm.gpkg"
     caminho_saida = "dataset_patches"
+<<<<<<< Updated upstream
     gerar_patches_com_buffer(caminho_imagem, caminho_pontos, caminho_saida, limite_patches=10)
+=======
+    gerar_patches_com_buffer(caminho_imagem, caminho_pontos, caminho_saida, limite_patches=100)
+>>>>>>> Stashed changes
