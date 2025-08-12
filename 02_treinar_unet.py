@@ -128,7 +128,7 @@ if __name__ == "__main__":
 
             loss_bce = bce_loss(outputs, masks)
             loss_focal = focal_loss(outputs, masks)
-            loss = loss_bce + loss_focal
+            loss = (loss_bce + loss_focal)*0.5
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
