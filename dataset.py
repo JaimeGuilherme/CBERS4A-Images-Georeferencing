@@ -1,31 +1,47 @@
 import os
 from PIL import Image
 from torch.utils.data import Dataset
-import torchvision.transforms as transforms
+import torchvision.transforms as T
 
 class RoadIntersectionDataset(Dataset):
-    def __init__(self, image_dir, mask_dir, transform=None):
-        self.image_dir = image_dir
-        self.mask_dir = mask_dir
-        self.images = sorted([f for f in os.listdir(image_dir) if f.lower().endswith('.tif')])
-        self.masks = sorted([f for f in os.listdir(mask_dir) if f.lower().endswith('.tif')])
-        assert len(self.images) == len(self.masks), 'Quantidade de imagens e máscaras difere'
+    def __init__(self, images_dir, masks_dir=None, transform=None):
+        self.images_dir = images_dir
+        self.masks_dir = masks_dir
         self.transform = transform
-        self.to_tensor = transforms.ToTensor()
+        self.images = sorted(os.listdir(images_dir))
+
+        if masks_dir is not None:
+            self.masks = sorted(os.listdir(masks_dir))
+            assert len(self.images) == len(self.masks), "Número de imagens e máscaras não bate!"
+        else:
+            self.masks = None
+
+        self.default_image_transform = T.ToTensor()
+        self.default_mask_transform = T.ToTensor()
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        img_path = os.path.join(self.image_dir, self.images[idx])
-        mask_path = os.path.join(self.mask_dir, self.masks[idx])
-        img_name = self.images[idx]; mask_name = self.masks[idx]
-        assert os.path.splitext(img_name)[0] == os.path.splitext(mask_name)[0], f"Nome de imagem e máscara diferentes: {img_name}, {mask_name}"
-        image = Image.open(img_path).convert('RGB')
-        mask = Image.open(mask_path).convert('L')
-        image = self.to_tensor(image)
-        mask = self.to_tensor(mask)
-        mask = (mask > 0.5).float()
-        if self.transform:
-            image = self.transform(image)
-        return image, mask
+        img_path = os.path.join(self.images_dir, self.images[idx])
+        image = Image.open(img_path).convert("RGB")
+
+        if self.masks is not None:
+            mask_path = os.path.join(self.masks_dir, self.masks[idx])
+            mask = Image.open(mask_path).convert("L")
+
+            if self.transform:
+                image, mask = self.transform(image, mask)
+            else:
+                image = self.default_image_transform(image)
+                mask = self.default_mask_transform(mask)
+                mask = (mask > 0.5).float()
+
+            return image, mask
+        else:
+            if self.transform:
+                image = self.transform(image)
+            else:
+                image = self.default_image_transform(image)
+
+            return image, self.images[idx]
