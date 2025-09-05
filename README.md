@@ -15,12 +15,12 @@ Usa **U-Net (CNN)** para segmentação binária das interseções, extrai pontos
 
 ```mermaid
 flowchart LR
-    A[Imagens CBERS-4A (GeoTIFF)] --> B[01_preparar_dataset.py\nGeração de patches + máscaras]
-    R[(Pontos de Interseção\n(GPKG/OSM))] --> B
-    B --> C[02_treinar_unet.py\nTreino U-Net + métricas + best_model.pth]
-    C --> D[03_inferir_pontos.py\nInferência em test -> máscaras + pontos]
-    D --> E[04_associar_pontos.py\nNN/raio -> pares_homologos.geojson]
-    E --> F[05_plugin_georref.py (QGIS)\nGeorreferenciamento a partir dos pares]
+    A["Imagens CBERS-4A (GeoTIFF)"] --> B["01_preparar_dataset.py<br/>Geração de patches + máscaras"]
+    R["Pontos de Interseção (GPKG/OSM)"] --> B
+    B --> C["02_treinar_unet.py<br/>Treino U-Net + métricas + best_model.pth"]
+    C --> D["03_inferir_pontos.py<br/>Inferência em test → máscaras + pontos"]
+    D --> E["04_associar_pontos.py<br/>NN/raio → pares_homologos.geojson"]
+    E --> F["05_plugin_georref.py (QGIS)<br/>Georreferenciamento a partir dos pares"]
 ```
 
 ---
