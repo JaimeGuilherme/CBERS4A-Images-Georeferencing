@@ -13,6 +13,45 @@ Usa **U-Net (CNN)** para segmentação binária das interseções, extrai pontos
 
 ## 🧭 Visão Geral do Pipeline
 
+### 1. Aquisição e Preparo dos Dados
+
+O diagrama abaixo mostra o fluxo de aquisição das imagens CBERS-4A e dos vetores OSM, passando pelo pré-processamento no QGIS até a organização final em pastas.
+
+```mermaid
+flowchart LR
+    %% Aquisição e Preparo dos Dados
+
+    subgraph IMG["Imagens (INPE / CBERS-4A WPM)"]
+      A1["Baixar bandas: PAN (2m), RGB e NIR"] --> A2["QGIS: Unir bandas RGB (composição)"]
+      A2 --> A3["QGIS: Pan-sharpening usando PAN (alta resolução + cores)"]
+    end
+
+    subgraph OSM["Vetores (Geofabrik / OSM)"]
+      B1["Baixar rodovias (linhas) da região"] --> B2["QGIS: Recortar linhas com polígono sobre a imagem"]
+    end
+
+    subgraph PTS["Gerar Pontos de Interseção"]
+      C1["Adicionar campo ID (Field Calculator)"] --> C2["Extract Specific Vertices (parâmetros 1,-1)"]
+      C2 --> C3["Script Python no QGIS:<br/>agrupar por WKB e manter pontos com ≥ 3 conexões"]
+      C3 --- Calt["Alternativa: Line Intersection + Join by Attributes + contagem ≥ 3 (remover duplicados)"]
+    end
+
+    subgraph GEOREF["Georreferenciamento no QGIS"]
+      D1["Ajustar imagem aos pontos extraídos (alinhamento)"] --> D2["Ajustes manuais em pontos com discrepância"]
+    end
+
+    subgraph ORG["Organização em Pastas"]
+      E1["Salvar imagens georreferenciadas em:<br/>input/imagens_tif/"] --> E2["Salvar pontos (GPKG) em:<br/>input/pontos_gpkg/"]
+    end
+
+    %% Encadeamento
+    IMG --> OSM --> PTS --> GEOREF --> ORG --> NEXT["Pronto para rodar:<br/>01_preparar_dataset.py"]
+```
+
+### 2. Execução do Pipeline
+
+Depois dos dados preparados, o pipeline segue com os scripts de treinamento, inferência, associação e georreferenciamento, conforme o diagrama abaixo:
+
 ```mermaid
 flowchart LR
     A["Imagens CBERS-4A (GeoTIFF)"] --> B["01_preparar_dataset.py<br/>Geração de patches + máscaras"]
@@ -304,9 +343,7 @@ print(metrics)
 
 ## 🛠️ Dicas Rápidas
 
-- **CRS/raio:** use CRS UTM e ajuste `max_distance` em metros.  
 - **Buffer:** ajuste `buffer_pixels` para calibrar a máscara de treino.  
-- **Tiles sobrepostos:** reduzem artefatos de borda.  
 - **Threshold:** usar o melhor `threshold` validado melhora extração de blobs.
 
 ---
