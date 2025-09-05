@@ -66,6 +66,8 @@ flowchart LR
 
 ## 📂 Estrutura do Projeto
 
+Apenas as pastas **components** e **input** são necessárias e com os arquivos já colocados. As demais vão sendo geradas conforme os scripts vão sendo executados
+
 ```
 ┌── 01_preparar_dataset.py # Script para preparar o dataset
 ├── 02_treinar_unet.py # Script de treinamento da U-Net
@@ -206,9 +208,9 @@ Com isso, temos:
 
 ---
 
-## 📁 Organização Final dos Dados
+## 📁 Organização Final dos Dados de Input
 
-Os arquivos devem ser organizados assim:
+Os arquivos de input devem ser organizados assim:
 
 ```
 input/
