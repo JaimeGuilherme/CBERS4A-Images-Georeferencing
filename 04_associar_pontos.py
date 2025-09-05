@@ -59,9 +59,9 @@ def associar_pontos(pontos_detectados_path, pasta_osm_path, output_path, max_dis
 
 
 if __name__ == '__main__':
-    os.makedirs('results', exist_ok=True)
+    os.makedirs('output', exist_ok=True)
     associar_pontos(
-        pontos_detectados_path='results/pontos_detectados.geojson',
+        pontos_detectados_path='output/pontos_detectados.geojson',
         pasta_osm_path='input/pontos_gpkg',
-        output_path='results/pares_homologos.geojson'
+        output_path='output/pares_homologos.geojson'
     )

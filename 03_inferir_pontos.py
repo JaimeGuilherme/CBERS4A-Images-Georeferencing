@@ -5,25 +5,27 @@ import numpy as np
 from shapely.geometry import Point
 import geopandas as gpd
 from scipy.ndimage import label, center_of_mass
-from dataset import RoadIntersectionDataset
-from unet import UNet
-from utils import load_checkpoint
 import rasterio
+
+from components.dataset import RoadIntersectionDataset
+from components.unet import UNet
+from components.utils import load_checkpoint
+
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def inferir_modelo(model, dataloader, device, threshold):
     model.eval()
-    results = []
+    output = []
     nomes = []
     with torch.no_grad():
         for imgs, nomes_patches in tqdm(dataloader, desc='Inferindo', leave=False):
             imgs = imgs.to(device)
             saida = torch.sigmoid(model(imgs))
             preds = (saida > threshold).float()
-            results.append(preds.cpu().numpy())
+            output.append(preds.cpu().numpy())
             nomes.extend(nomes_patches)
-    return results, nomes
+    return output, nomes
 
 def extrair_pontos(preds_binarias, nomes_patches, pasta_imagens):
     dados = []
@@ -57,8 +59,8 @@ if __name__ == '__main__':
     caminho_modelo = 'checkpoints/best_model.pth'
     caminho_test_img = 'dataset_separated/test/images'
     batch_size = 1
-    caminho_saida_geojson = 'results/pontos_detectados.geojson'
-    pasta_saida_mascaras = 'results/mascaras_patches'
+    caminho_saida_geojson = 'output/pontos_detectados.geojson'
+    pasta_saida_mascaras = 'output/mascaras_patches'
 
     os.makedirs(pasta_saida_mascaras, exist_ok=True)
     os.makedirs(os.path.dirname(caminho_saida_geojson), exist_ok=True)
@@ -72,9 +74,9 @@ if __name__ == '__main__':
     test_dataset = RoadIntersectionDataset(caminho_test_img, masks_dir=None, transform=None)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    results_bin, nomes_patches = inferir_modelo(model, test_loader, DEVICE, threshold)
+    output_bin, nomes_patches = inferir_modelo(model, test_loader, DEVICE, threshold)
 
-    for pred, nome_patch in tqdm(zip(results_bin, nomes_patches),
+    for pred, nome_patch in tqdm(zip(output_bin, nomes_patches),
                                 total=len(nomes_patches),
                                 desc="Salvando máscaras"):
         mask_patch = (pred[0, 0] > 0).astype(np.uint8) * 255
@@ -86,7 +88,7 @@ if __name__ == '__main__':
         with rasterio.open(saida_patch, 'w', **meta) as dst:
             dst.write(mask_patch, 1)
 
-    gdf_pontos = extrair_pontos(results_bin, nomes_patches, caminho_test_img)
+    gdf_pontos = extrair_pontos(output_bin, nomes_patches, caminho_test_img)
 
     if not gdf_pontos.empty:
         gdf_pontos.to_file(caminho_saida_geojson, driver='GeoJSON')

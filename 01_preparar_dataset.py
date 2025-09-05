@@ -42,7 +42,7 @@ def criar_mascara(points, img_width, img_height, buffer_pixels=5):
 
     return np.array(mask) > 0
 
-def carregar_pontos_bufferados(gdf_pontos, transform, img_width, img_height, buffer_pixels=5, img_crs_epsg=32724):
+def carregar_pontos(gdf_pontos, transform, img_width, img_height, img_crs_epsg=32724):
     points_px = []
     transformer = Transformer.from_crs(gdf_pontos.crs, f"EPSG:{img_crs_epsg}", always_xy=True)
 
@@ -125,7 +125,7 @@ def gerar_patches_multiplas_imagens(caminho_imagens, pontos, saida_path, patch_s
             img_width = src.width
             img_height = src.height
 
-            points_px = carregar_pontos_bufferados(pontos, transform, img_width, img_height, buffer_pixels)
+            points_px = carregar_pontos(pontos, transform, img_width, img_height)
             print(f"   Pontos dentro desta imagem: {len(points_px)}")
 
             rows = math.ceil(img_height / patch_size)

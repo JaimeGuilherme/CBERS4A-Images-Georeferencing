@@ -1,17 +1,17 @@
 import os
 import torch
 import torch.optim as optim
-import mlflow
-import mlflow.pytorch
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
 from glob import glob
-from dataset import RoadIntersectionDataset
-from unet import UNet
-from metrics import calculate_metrics
-from utils import save_model, load_checkpoint
-from losses import FocalLoss
+
+from components.dataset import RoadIntersectionDataset
+from components.unet import UNet
+from components.metrics import calculate_metrics
+from components.utils import save_model, load_checkpoint
+from components.losses import FocalLoss
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -84,8 +84,8 @@ if __name__ == "__main__":
     caminho_test_mask = "dataset_separated/test/masks"
 
     caminho_checkpoint = "checkpoints"
-    epocas = 10
-    batch = 10
+    epocas = 2
+    batch = 5
     lr = 1e-4
     salvar_checkpoint_a_cada = 5
 
@@ -123,86 +123,112 @@ if __name__ == "__main__":
         print("🚀 Nenhum checkpoint encontrado. Iniciando treinamento do zero.")
 
     best_val_loss = float('inf')
+    patience = 3
+    patience_counter = 0
+    ema_val_loss = None
+    alpha = 0.3
 
-    mlflow.set_experiment("Detecção Cruzamento Rodovias")
+    writer = SummaryWriter(log_dir="runs/Deteccao_Cruzamento_Rodovias")
+    writer.add_text("Hiperparametros", 
+                    f"epochs={epocas}, batch_size={batch}, lr={lr}, "
+                    f"loss=FocalLoss(alpha=0.8, gamma=2), model=U-Net, "
+                    f"early_stopping=EMA(alpha={alpha}, patience={patience})")
 
-    with mlflow.start_run():
-        mlflow.log_param("epochs", epocas)
-        mlflow.log_param("batch_size", batch)
-        mlflow.log_param("learning_rate", lr)
-        mlflow.log_param("loss_function", "FocalLoss(alpha=0.8, gamma=2)")
-        mlflow.log_param("model", "U-Net")
+    stopped_epoch = None
 
-        for epoch in range(start_epoch, epocas):
-            print(f"\nEpoch {epoch+1}/{epocas}")
-            model.train()
-            train_loss = 0.0
+    for epoch in range(start_epoch, epocas):
+        print(f"\nEpoch {epoch+1}/{epocas}")
+        model.train()
+        train_loss = 0.0
 
-            loop = tqdm(train_loader, desc="Treinando", leave=False)
-            for images, masks in loop:
-                images = images.to(DEVICE)
-                masks = masks.to(DEVICE).float()
+        loop = tqdm(train_loader, desc="Treinando", leave=False)
+        for images, masks in loop:
+            images = images.to(DEVICE)
+            masks = masks.to(DEVICE).float()
 
-                outputs = model(images)
-                loss = focal_loss(outputs, masks)
+            outputs = model(images)
+            loss = focal_loss(outputs, masks)
 
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
 
-                train_loss += loss.item()
-                loop.set_postfix(loss=loss.item())
+            train_loss += loss.item()
+            loop.set_postfix(loss=loss.item())
 
-            avg_train_loss = train_loss / len(train_loader)
-            print(f"Loss médio treino: {avg_train_loss:.4f}")
-            mlflow.log_metric("train_loss", avg_train_loss, step=epoch)
+        avg_train_loss = train_loss / len(train_loader)
+        print(f"Loss médio treino: {avg_train_loss:.4f}")
+        writer.add_scalar("Loss/treino", avg_train_loss, epoch)
 
-            if val_loader is not None:
-                model.eval()
-                val_loss = 0.0
-                with torch.no_grad():
-                    for images, masks in val_loader:
-                        images = images.to(DEVICE)
-                        masks = masks.to(DEVICE).float()
-                        outputs = model(images)
-                        loss = focal_loss(outputs, masks)
-                        val_loss += loss.item()
-                val_loss /= len(val_loader)
-                print(f"Loss médio validação: {val_loss:.4f}")
-                mlflow.log_metric("val_loss", val_loss, step=epoch)
+        if val_loader is not None:
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for images, masks in val_loader:
+                    images = images.to(DEVICE)
+                    masks = masks.to(DEVICE).float()
+                    outputs = model(images)
+                    loss = focal_loss(outputs, masks)
+                    val_loss += loss.item()
+            val_loss /= len(val_loader)
+            print(f"Loss médio validação: {val_loss:.4f}")
+            writer.add_scalar("Loss/validacao", val_loss, epoch)
 
-                best_t_epoca, iou_val_threshold_search = buscar_melhor_threshold(model, val_loader, DEVICE)
-                iou_val, prec_val, rec_val = avaliar_modelo(model, val_loader, DEVICE, threshold=best_t_epoca)
-                print(f"Melhor threshold: {best_t_epoca:.2f} | IoU: {iou_val:.4f} | Precisão: {prec_val:.4f} | Recall: {rec_val:.4f}")
+            if ema_val_loss is None:
+                ema_val_loss = val_loss
+            else:
+                ema_val_loss = alpha * val_loss + (1 - alpha) * ema_val_loss
 
-                mlflow.log_metric("val_iou", iou_val, step=epoch)
-                mlflow.log_metric("val_precision", prec_val, step=epoch)
-                mlflow.log_metric("val_recall", rec_val, step=epoch)
-                mlflow.log_metric("val_best_threshold", best_t_epoca, step=epoch)
+            writer.add_scalar("Loss/val_EMA", ema_val_loss, epoch)
 
-                if (epoch + 1) % salvar_checkpoint_a_cada == 0:
-                    checkpoint_path = os.path.join(caminho_checkpoint, f"checkpoint_epoch_{epoch+1}.pth")
-                    save_model(model, checkpoint_path, optimizer=optimizer, epoch=epoch,
-                               best_iou=best_iou, best_threshold=best_t_epoca)
-                    mlflow.log_artifact(checkpoint_path, artifact_path="checkpoints")
-                    print(f"💾 Checkpoint salvo em {checkpoint_path}")
+            if ema_val_loss > best_val_loss:
+                patience_counter += 1
+                print(f"⚠️ Val_loss(EMA) piorou ({ema_val_loss:.4f} > {best_val_loss:.4f}) "
+                      f"| patience {patience_counter}/{patience}")
+                if patience_counter >= patience:
+                    print("🛑 Parando treino antecipadamente: perda suavizada de validação começou a subir.")
+                    stopped_epoch = epoch + 1
+                    writer.add_scalar("EarlyStopping/Stopped_epoch", stopped_epoch, epoch)
+                    break
+            else:
+                patience_counter = 0
+                best_val_loss = ema_val_loss
 
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    best_threshold = best_t_epoca
-                    best_model_path = os.path.join(caminho_checkpoint, "best_model.pth")
-                    save_model(model, best_model_path, optimizer=optimizer, epoch=epoch,
-                               best_iou=iou_val, best_threshold=best_threshold)
-                    mlflow.pytorch.log_model(model, "best_model")
-                    print(f"🔁 Novo melhor modelo salvo em {best_model_path}")
+            best_t_epoca, iou_val_threshold_search = buscar_melhor_threshold(model, val_loader, DEVICE)
+            iou_val, prec_val, rec_val = avaliar_modelo(model, val_loader, DEVICE, threshold=best_t_epoca)
+            print(f"Melhor threshold: {best_t_epoca:.2f} | IoU: {iou_val:.4f} | Precisão: {prec_val:.4f} | Recall: {rec_val:.4f}")
 
-        print("\n✅ Treinamento finalizado.")
+            writer.add_scalar("Metricas/val_iou", iou_val, epoch)
+            writer.add_scalar("Metricas/val_precision", prec_val, epoch)
+            writer.add_scalar("Metricas/val_recall", rec_val, epoch)
+            writer.add_scalar("Metricas/val_best_threshold", best_t_epoca, epoch)
 
-        if test_loader is not None:
-            print("\n🔍 Avaliando modelo no conjunto de TESTE...")
-            iou_test, prec_test, rec_test = avaliar_modelo(model, test_loader, DEVICE, threshold=best_threshold)
-            print(f"Test IoU: {iou_test:.4f} | Precisão: {prec_test:.4f} | Recall: {rec_test:.4f}")
+            if (epoch + 1) % salvar_checkpoint_a_cada == 0:
+                checkpoint_path = os.path.join(caminho_checkpoint, f"checkpoint_epoch_{epoch+1}.pth")
+                save_model(model, checkpoint_path, optimizer=optimizer, epoch=epoch,
+                           best_iou=best_iou, best_threshold=best_t_epoca)
+                print(f"💾 Checkpoint salvo em {checkpoint_path}")
 
-            mlflow.log_metric("test_iou", iou_test)
-            mlflow.log_metric("test_precision", prec_test)
-            mlflow.log_metric("test_recall", rec_test)
+            if val_loss < best_val_loss:
+                best_val_loss = ema_val_loss
+                best_threshold = best_t_epoca
+                best_model_path = os.path.join(caminho_checkpoint, "best_model.pth")
+                save_model(model, best_model_path, optimizer=optimizer, epoch=epoch,
+                           best_iou=iou_val, best_threshold=best_threshold)
+                print(f"🔁 Novo melhor modelo salvo em {best_model_path}")
+
+    print("\n✅ Treinamento finalizado.")
+
+    if stopped_epoch is not None:
+        print(f"📌 Early stopping ativado na época {stopped_epoch}.")
+
+    if test_loader is not None:
+        print("\n🔍 Avaliando modelo no conjunto de TESTE...")
+        iou_test, prec_test, rec_test = avaliar_modelo(model, test_loader, DEVICE, threshold=best_threshold)
+        print(f"Test IoU: {iou_test:.4f} | Precisão: {prec_test:.4f} | Recall: {rec_test:.4f}")
+
+        writer.add_scalar("Metricas/test_iou", iou_test)
+        writer.add_scalar("Metricas/test_precision", prec_test)
+        writer.add_scalar("Metricas/test_recall", rec_test)
+
+    writer.close()
