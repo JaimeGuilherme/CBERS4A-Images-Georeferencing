@@ -1,88 +1,246 @@
-import os, glob, torch, numpy as np, geopandas as gpd, rasterio
-from rasterio.windows import Window
-from shapely.geometry import Point
-from sklearn.neighbors import NearestNeighbors
+import os
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader
+from pyproj import Transformer
 from tqdm import tqdm
-from unet import UNet
-from utils import load_checkpoint
-from scipy.ndimage import label
+import geopandas as gpd
+from shapely.geometry import Point
+from scipy.ndimage import label, center_of_mass
+from sklearn.neighbors import NearestNeighbors
+import rasterio
+from rasterio.windows import Window
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-PATCH_SIZE = 256; OVERLAP = 0.3; THRESHOLD = 0.5; MAX_ASSOC_DISTANCE = 20; CHECKPOINTS_DIR = 'checkpoints'
+from components.dataset import RoadIntersectionDataset
+from components.unet import UNet
+from components.utils import load_checkpoint
 
-def transform_image_patch(patch_np):
-    if patch_np.ndim == 3 and patch_np.shape[0] != 3:
-        patch_np = patch_np.transpose(2,0,1)
-    patch_np = patch_np.astype(np.float32) / 255.0
-    patch_tensor = torch.from_numpy(patch_np)
-    patch_tensor = patch_tensor.unsqueeze(0)
-    return patch_tensor
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def carregar_modelos(checkpoints_dir):
-    paths = sorted(glob.glob(os.path.join(checkpoints_dir, '*.pth')))
-    modelos = []
-    for path in paths:
-        model = UNet(in_channels=3, out_channels=1).to(DEVICE)
-        load_checkpoint(path, model)
-        model.eval(); modelos.append(model)
-    return modelos
+def carregar_pontos_gpkg(pasta):
+    print(f"\n📌 Processando Pontos gpkg...")
+    gdfs = []
 
-def dividir_em_patches_do_raster(imagem_path, patch_size=PATCH_SIZE, overlap=OVERLAP):
-    patches, coords, transforms = [], [], []
+    for arquivo in os.listdir(pasta):
+        if arquivo.lower().endswith(".gpkg"):
+            caminho = os.path.join(pasta, arquivo)
+            try:
+                gdf = gpd.read_file(caminho)
+                gdfs.append(gdf)
+            except Exception as e:
+                print(f"Erro ao carregar {caminho}: {e}")
+
+    if not gdfs:
+        raise FileNotFoundError("Nenhum .gpkg encontrado na pasta!")
+
+    gdf_unificado = gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True), crs=gdfs[0].crs)
+
+    return gdf_unificado
+
+def carregar_pontos_bufferados(gdf_pontos, transform, img_width, img_height, buffer_pixels=5, img_crs_epsg=32724):
+    points_px = []
+    transformer = Transformer.from_crs(gdf_pontos.crs, f"EPSG:{img_crs_epsg}", always_xy=True)
+
+    for _, row in gdf_pontos.iterrows():
+        if row.geometry is None or row.geometry.geom_type != "Point":
+            continue
+
+        lon, lat = row.geometry.x, row.geometry.y
+        x_m, y_m = transformer.transform(lon, lat)
+        px, py = ~transform * (x_m, y_m)
+        px, py = int(px), int(py)
+
+        if 0 <= px < img_width and 0 <= py < img_height:
+            points_px.append((px, py))
+
+    return points_px
+
+def gerar_patches(imagem_path, saida_path, points_px, patch_size=256, limite_patches=None):
+    os.makedirs(saida_path, exist_ok=True)
+    patches = []
+    patch_id = 0
+    interrompido_por_limite = False
+
     with rasterio.open(imagem_path) as src:
-        img_width = src.width; img_height = src.height
-        step = int(patch_size * (1-overlap))
-        for y in range(0, img_height - patch_size + 1, step):
-            for x in range(0, img_width - patch_size + 1, step):
-                window = Window(x, y, patch_size, patch_size)
-                patch = src.read([1,2,3], window=window)
-                patches.append(patch); coords.append((x,y)); transforms.append(src.window_transform(window))
-        crs = src.crs
-    return patches, coords, transforms, crs
+        img_width, img_height = src.width, src.height
+        base_meta = src.meta.copy()
 
-def detectar_pontos(pred_map, threshold=THRESHOLD):
-    binary_map = pred_map > threshold
-    labeled, n_features = label(binary_map)
-    pontos = []
-    for i in range(1, n_features+1):
-        ys, xs = np.where(labeled==i)
-        x_centro = int(np.mean(xs)); y_centro = int(np.mean(ys))
-        pontos.append((x_centro, y_centro))
-    return pontos
+        total_rows = (img_height + patch_size - 1) // patch_size
 
-def main(imagem_path, pontos_osm_path, output_pares_path):
-    modelos = carregar_modelos(CHECKPOINTS_DIR)
-    patches, coords, transforms, crs = dividir_em_patches_do_raster(imagem_path)
-    todos_pontos_detectados = []
-    for patch, origin, tr in tqdm(zip(patches, coords, transforms), total=len(patches)):
-        patch_tensor = transform_image_patch(patch)
-        with torch.no_grad():
-            preds = []
-            for m in modelos:
-                out = torch.sigmoid(m(patch_tensor.to(DEVICE)))
-                preds.append(out.cpu().numpy())
-            mean_pred = np.mean(preds, axis=0)[0,0]
-        pontos_patch = detectar_pontos(mean_pred)
-        for xpix, ypix in pontos_patch:
-            lon, lat = rasterio.transform.xy(tr, ypix, xpix)
-            todos_pontos_detectados.append(Point(lon, lat))
-    gdf_detect = gpd.GeoDataFrame(geometry=todos_pontos_detectados, crs=crs)
-    gdf_osm = gpd.read_file(pontos_osm_path)
-    if gdf_detect.crs != gdf_osm.crs:
-        gdf_detect = gdf_detect.to_crs(gdf_osm.crs)
-    coords_detect = np.array([(p.x, p.y) for p in gdf_detect.geometry])
-    coords_osm = np.array([(p.x, p.y) for p in gdf_osm.geometry])
+        for top in tqdm(range(0, img_height, patch_size), desc="Gerando patches", total=total_rows):
+            for left in range(0, img_width, patch_size):
+                width = min(patch_size, img_width - left)
+                height = min(patch_size, img_height - top)
+
+                patch_points = [
+                    (px - left, py - top)
+                    for (px, py) in points_px
+                    if left <= px < left + width and top <= py < top + height
+                ]
+                if not patch_points:
+                    continue
+
+                window = Window(left, top, width, height)
+                patch = src.read(window=window)
+
+                patch_img = patch.astype(np.float32)
+                patch_img -= patch_img.min()
+                if patch_img.max() > 0:
+                    patch_img /= patch_img.max()
+                patch_img *= 255
+                patch_img = patch_img.astype(np.uint8)
+
+                if patch_img.shape[0] < 3:
+                    patch_img = np.repeat(patch_img, 3, axis=0)
+                elif patch_img.shape[0] > 3:
+                    patch_img = patch_img[:3]
+
+                patch_filename = f"patch_{patch_id:05d}.tif"
+                patch_path = os.path.join(saida_path, patch_filename)
+
+                meta = base_meta.copy()
+                meta.update({
+                    "height": height,
+                    "width": width,
+                    "transform": src.window_transform(window),
+                    "count": 3,
+                    "dtype": patch_img.dtype
+                })
+
+                with rasterio.open(patch_path, "w", **meta) as dst:
+                    dst.write(patch_img)
+
+                patches.append(patch_filename)
+                patch_id += 1
+
+                if limite_patches and patch_id >= limite_patches:
+                    print(f"⚡ Limite de {limite_patches} patches atingido.")
+                    interrompido_por_limite = True
+                    break
+            if interrompido_por_limite:
+                break
+
+    return patches
+
+def inferir_pontos(patches_dir, modelo_path, batch_size=1):
+    model = UNet(in_channels=3, out_channels=1).to(DEVICE)
+    checkpoint = load_checkpoint(modelo_path, model)
+    threshold = checkpoint.get("best_threshold", 0.5)
+
+    dataset = RoadIntersectionDataset(patches_dir, masks_dir=None)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    output, nomes = [], []
+    model.eval()
+    with torch.no_grad():
+        for imgs, nomes_patches in tqdm(dataloader, desc="Inferindo patches"):
+            imgs = imgs.to(DEVICE)
+            saida = torch.sigmoid(model(imgs))
+            preds = (saida > threshold).float()
+            output.append(preds.cpu().numpy())
+            nomes.extend(nomes_patches)
+
+    dados = []
+    for pred, nome_patch in tqdm(zip(output, nomes), total=len(nomes), desc="Extraindo pontos"):
+        mask = pred.squeeze().astype(np.uint8)
+        labeled, num_features = label(mask)
+        if num_features == 0:
+            continue
+        centros = center_of_mass(mask, labeled, range(1, num_features + 1))
+        patch_path = os.path.join(patches_dir, nome_patch)
+        with rasterio.open(patch_path) as src:
+            patch_transform = src.transform
+            crs = src.crs
+        for centro in centros:
+            y, x = centro
+            lon, lat = rasterio.transform.xy(patch_transform, int(round(y)), int(round(x)))
+            dados.append({"geometry": Point(lon, lat)})
+    gdf = gpd.GeoDataFrame(dados, crs=crs if dados else None)
+    return gdf
+
+def carregar_pontos_gpkg(pasta):
+    gdfs = []
+    for arquivo in tqdm(os.listdir(pasta), desc="Carregando arquivos GPKG"):
+        if arquivo.lower().endswith(".gpkg"):
+            caminho = os.path.join(pasta, arquivo)
+            gdf = gpd.read_file(caminho)
+            gdfs.append(gdf)
+    if not gdfs:
+        raise FileNotFoundError("Nenhum .gpkg encontrado!")
+    return gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True), crs=gdfs[0].crs)
+
+def associar_pontos(detectados, pasta_osm, output_path, max_distance=20):
+    osm = carregar_pontos_gpkg(pasta_osm)
+    if detectados.crs != osm.crs:
+        detectados = detectados.to_crs(osm.crs)
+
+    coords_detect = np.array([(geom.x, geom.y) for geom in detectados.geometry])
+    coords_osm = np.array([(geom.x, geom.y) for geom in osm.geometry])
+
     nbrs = NearestNeighbors(n_neighbors=1).fit(coords_osm)
     distances, indices = nbrs.kneighbors(coords_detect)
-    pares = []
-    for i,(d,idx) in enumerate(zip(distances.flatten(), indices.flatten())):
-        if d <= MAX_ASSOC_DISTANCE:
-            pares.append({'id_detectado': int(i),'id_osm': int(gdf_osm.index[idx]),'distancia': float(d),'geometry_detectado': gdf_detect.geometry.iloc[i],'geometry_osm': gdf_osm.geometry.iloc[idx]})
-    gdf_pares = gpd.GeoDataFrame(pares, geometry='geometry_detectado', crs=gdf_osm.crs)
-    os.makedirs(os.path.dirname(output_pares_path), exist_ok=True)
-    gdf_pares.to_file(output_pares_path, driver='GeoJSON')
-    print('Pares salvos em', output_pares_path, 'total:', len(pares))
 
-if __name__ == '__main__':
-    imagem_nova = 'input/imagem_nova.tif'; pontos_osm = 'input/intersecoes_osm_nova.gpkg'; saida = 'output/pares_homologos.geojson'
-    main(imagem_nova, pontos_osm, saida)
+    pares = []
+    for i, (dist, idx) in tqdm(enumerate(zip(distances.flatten(), indices.flatten())),
+                               total=len(distances),
+                               desc="Associando pontos"):
+        if dist <= max_distance:
+            pares.append({
+                "id_detectado": int(detectados.index[i]),
+                "id_osm": int(osm.index[idx]),
+                "distancia": float(dist),
+                "geometry_detectado": detectados.geometry.iloc[i],
+                "geometry_osm": osm.geometry.iloc[idx]
+            })
+
+    gdf_pares = gpd.GeoDataFrame(pares, geometry="geometry_detectado", crs=osm.crs)
+    gdf_pares.to_file(output_path, driver="GeoJSON")
+    return gdf_pares
+
+if __name__ == "__main__":
+    pasta_imagens = "main_input/imagens_tif"
+    pasta_patches = "temp_patches"
+    modelo_path = "checkpoints/best_model.pth"
+    pasta_osm = "main_input/pontos_gpkg"
+    saida_pares = "main_output/pares_homologos.geojson"
+
+    nome_imagem = "imagem1.tif"
+    imagem = os.path.join(pasta_imagens, nome_imagem)
+    if not os.path.exists(imagem):
+        raise FileNotFoundError(f"Arquivo {nome_imagem} não encontrado em {pasta_imagens}")
+
+    nome_gpkg = "intersecoes_osm.gpkg"
+    caminho = os.path.join(pasta_osm, nome_gpkg)
+    if not os.path.exists(caminho):
+        raise FileNotFoundError(f"Arquivo {nome_gpkg} não encontrado em {pasta_osm}")
+
+    print(f"\n📌 Carregando {nome_gpkg}...")
+    pontos = gpd.read_file(caminho)
+
+    os.makedirs("main_output", exist_ok=True)
+    os.makedirs(pasta_patches, exist_ok=True)
+
+    nome_img = os.path.splitext(nome_imagem)[0]
+    pasta_patches_img = os.path.join(pasta_patches, nome_img)
+    os.makedirs(pasta_patches_img, exist_ok=True)
+
+    print(f"📌 Quebrando imagem {nome_img} em patches...")
+    with rasterio.open(imagem) as src:
+        transform = src.transform
+        img_width = src.width
+        img_height = src.height
+
+    points_px = carregar_pontos_bufferados(pontos, transform, img_width, img_height, buffer_pixels=5)
+    gerar_patches(imagem, pasta_patches_img, points_px)
+
+    print(f"📌 Rodando inferência em {nome_img}...")
+    gdf_detectados = inferir_pontos(pasta_patches_img, modelo_path)
+    gdf_detectados["imagem_origem"] = nome_img
+
+    gdf_detectados_total = gpd.GeoDataFrame(gdf_detectados, crs=gdf_detectados.crs)
+
+    print("📌 Associando pontos detectados com OSM...")
+    gdf_pares = associar_pontos(gdf_detectados_total, pasta_osm, saida_pares)
+
+    print("✅ Pipeline concluído. Pares salvos em", saida_pares)
