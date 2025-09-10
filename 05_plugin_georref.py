@@ -128,7 +128,7 @@ def inferir_pontos(patches_dir, modelo_path, batch_size=1):
     checkpoint = load_checkpoint(modelo_path, model)
     threshold = checkpoint.get("best_threshold", 0.5)
 
-    dataset = RoadIntersectionDataset(patches_dir, masks_dir=None)
+    dataset = RoadIntersectionDataset(patches_dir, masks_dir=None, transform=None, is_training=False)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     output, nomes = [], []

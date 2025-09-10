@@ -71,7 +71,7 @@ if __name__ == '__main__':
     threshold = checkpoint.get('best_threshold', 0.5)
     print(f'Usando threshold: {threshold}')
 
-    test_dataset = RoadIntersectionDataset(caminho_test_img, masks_dir=None, transform=None)
+    test_dataset = RoadIntersectionDataset(caminho_test_img, masks_dir=None, transform=None, is_training=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     output_bin, nomes_patches = inferir_modelo(model, test_loader, DEVICE, threshold)
