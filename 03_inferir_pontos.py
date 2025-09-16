@@ -10,7 +10,7 @@ import rasterio
 
 from components.dataset import RoadIntersectionDataset
 from components.unet import UNet
-from components.utils import load_checkpoint
+from components.utils import load_checkpoint_raw
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -108,7 +108,7 @@ if __name__ == '__main__':
     in_ch = 3 if BANDS_MODE == "rgb" else 4
     print('Carregando modelo:', caminho_modelo)
     model = build_model(ARCH, in_ch)
-    checkpoint = load_checkpoint(caminho_modelo, model)
+    checkpoint = load_checkpoint_raw(caminho_modelo, map_location=DEVICE)
     adapt_first_conv_if_needed(model, checkpoint)
 
     threshold = checkpoint.get('best_threshold', 0.5)
