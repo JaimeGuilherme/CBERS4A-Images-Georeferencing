@@ -48,7 +48,7 @@ class RoadIntersectionDataset(Dataset):
             if C == 2:
                 return np.concatenate([image_hwc, image_hwc[:, :, :1]], axis=2)
             return np.repeat(image_hwc, 3, axis=2)
-        else:  # "rgbnir"
+        else:
             if C >= 4:
                 return image_hwc[:, :, :4]
             if C == 3:
@@ -153,9 +153,8 @@ if __name__ == "__main__":
     '''
     Exemplos de uso:
       - RGB (3 canais): instancie sua UNet com in_channels=3.
-      - RGB+NIR (4 canais): instancie sua UNet com in_channels=4.  (A UNet suporta in_channels variável.)  # :contentReference[oaicite:0]{index=0}
+      - RGB+NIR (4 canais): instancie sua UNet com in_channels=4.  (A UNet suporta in_channels variável.)
     '''
-    # RGB (sem NIR)
     train_rgb = RoadIntersectionDataset(
         images_dir="dataset/train/images",
         masks_dir="dataset/train/masks",
@@ -170,7 +169,6 @@ if __name__ == "__main__":
     )
     print(f"[RGB] Train={len(train_rgb)}  Val={len(val_rgb)}  mean={train_rgb.mean}  std={train_rgb.std}")
 
-    # RGB+NIR
     train_rgbnir = RoadIntersectionDataset(
         images_dir="dataset/train/images",
         masks_dir="dataset/train/masks",
