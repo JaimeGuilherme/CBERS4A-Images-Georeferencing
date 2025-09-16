@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import rasterio
 from PIL import Image
 from torch.utils.data import Dataset
 import torch
@@ -8,242 +9,178 @@ from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
 
 class RoadIntersectionDataset(Dataset):
-    def __init__(self, images_dir, masks_dir=None, transform=None, is_training=False):
+    '''
+    bands_mode:
+      - "rgb"    → 3 canais (R,G,B). Se houver 4 bandas, descarta NIR.
+      - "rgbnir" → 4 canais (R,G,B,NIR). Se houver só 3, adiciona NIR vazio.
+    '''
+    def __init__(self, images_dir, masks_dir=None, transform=None, is_training=False, bands_mode="rgb"):
+        assert bands_mode in ("rgb", "rgbnir")
         self.images_dir = images_dir
         self.masks_dir = masks_dir
         self.is_training = is_training
-        self.images = sorted(os.listdir(images_dir))
+        self.bands_mode = bands_mode
 
-        if masks_dir is not None:
-            self.masks = sorted(os.listdir(masks_dir))
+        self.images = sorted([f for f in os.listdir(images_dir) if os.path.isfile(os.path.join(images_dir, f))])
+        self.masks = sorted([f for f in os.listdir(masks_dir) if os.path.isfile(os.path.join(masks_dir, f))]) if masks_dir else None
+        if self.masks is not None:
             assert len(self.images) == len(self.masks), "Número de imagens e máscaras não bate!"
-        else:
-            self.masks = None
 
-        # Calcular estatísticas do dataset (média e desvio padrão por canal)
         print("🔍 Calculando estatísticas do dataset...")
         self.mean, self.std = self._calculate_dataset_stats()
         print(f"📊 Média por canal: {self.mean}")
         print(f"📊 Desvio padrão por canal: {self.std}")
 
-        # Definir transformações baseadas se é treinamento ou não
-        if transform is not None:
-            self.transform = transform
-        else:
-            self.transform = self._get_default_transforms(is_training)
+        self.transform = transform if transform is not None else self._get_default_transforms(is_training)
+
+    def _read_image_hwc_allbands(self, path):
+        with rasterio.open(path) as src:
+            arr = src.read()
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, ...]
+        return arr.transpose(1, 2, 0)
+
+    def _select_bands(self, image_hwc):
+        H, W, C = image_hwc.shape
+        if self.bands_mode == "rgb":
+            if C >= 3:
+                return image_hwc[:, :, :3]
+            if C == 2:
+                return np.concatenate([image_hwc, image_hwc[:, :, :1]], axis=2)
+            return np.repeat(image_hwc, 3, axis=2)
+        else:  # "rgbnir"
+            if C >= 4:
+                return image_hwc[:, :, :4]
+            if C == 3:
+                nir_zero = np.zeros((H, W, 1), dtype=image_hwc.dtype)
+                return np.concatenate([image_hwc, nir_zero], axis=2)
+            if C == 2:
+                tmp3 = np.concatenate([image_hwc, image_hwc[:, :, :1]], axis=2)
+                nir_zero = np.zeros((H, W, 1), dtype=image_hwc.dtype)
+                return np.concatenate([tmp3, nir_zero], axis=2)
+            tmp3 = np.repeat(image_hwc, 3, axis=2)
+            nir_zero = np.zeros((H, W, 1), dtype=image_hwc.dtype)
+            return np.concatenate([tmp3, nir_zero], axis=2)
+
+    def _read_image_selected(self, path):
+        hwc = self._read_image_hwc_allbands(path)
+        return self._select_bands(hwc)
 
     def _calculate_dataset_stats(self):
-        """Calcular média e desvio padrão por canal do dataset"""
-        pixel_values_r = []
-        pixel_values_g = []
-        pixel_values_b = []
-        
-        # Iterar por todas as imagens para calcular estatísticas
+        '''
+        Estatísticas por canal após a seleção de bandas (3 ou 4).
+        '''
+        sums = None
+        sums2 = None
+        count = 0
         for img_name in tqdm(self.images, desc="Calculando estatísticas"):
             img_path = os.path.join(self.images_dir, img_name)
-            image = Image.open(img_path).convert("RGB")
-            image = np.array(image) #/ 255.0  # Normalizar para [0, 1]
-            
-            # Coletar valores por canal
-            pixel_values_r.extend(image[:, :, 0].flatten())
-            pixel_values_g.extend(image[:, :, 1].flatten())
-            pixel_values_b.extend(image[:, :, 2].flatten())
-        
-        # Calcular média e desvio padrão por canal
-        mean_r = np.mean(pixel_values_r)
-        mean_g = np.mean(pixel_values_g)
-        mean_b = np.mean(pixel_values_b)
-        
-        std_r = np.std(pixel_values_r)
-        std_g = np.std(pixel_values_g)
-        std_b = np.std(pixel_values_b)
-        
-        return [mean_r, mean_g, mean_b], [std_r, std_g, std_b]
+            try:
+                image = self._read_image_selected(img_path)
+            except Exception:
+                continue
+            H, W, C = image.shape
+            flat = image.reshape(-1, C).astype(np.float64)
+            if sums is None:
+                sums = flat.sum(axis=0)
+                sums2 = (flat ** 2).sum(axis=0)
+            else:
+                sums += flat.sum(axis=0)
+                sums2 += (flat ** 2).sum(axis=0)
+            count += flat.shape[0]
+        mean = (sums / count).tolist()
+        var = (sums2 / count) - (np.array(mean) ** 2)
+        std = np.sqrt(np.clip(var, 0, None)).tolist()
+        return mean, std
 
     def _get_default_transforms(self, is_training=False):
-        """Criar pipeline de transformações usando Albumentations"""
-        
+        base = [
+            A.Normalize(mean=self.mean, std=self.std, max_pixel_value=255.0),
+            ToTensorV2()
+        ]
         if is_training:
-            # Transformações para treinamento (com augmentations)
-            transform_list = [
-                # Transformações geométricas
+            aug = [
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.5),
                 A.RandomRotate90(p=0.5),
-                
-                # Transformações de cor/brilho
-                A.RandomBrightnessContrast(
-                    brightness_limit=0.2,
-                    contrast_limit=0.2,
-                    p=0.5
-                ),
-                
-                # Normalização com estatísticas calculadas do dataset
-                A.Normalize(
-                    mean=self.mean,
-                    std=self.std,
-                    max_pixel_value=255.0
-                ),
-                
-                # Converter para tensor
-                ToTensorV2()
+                A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
             ]
-        else:
-            # Transformações para validação/teste (sem augmentations)
-            transform_list = [
-                # Apenas normalização e conversão para tensor
-                A.Normalize(
-                    mean=self.mean,
-                    std=self.std,
-                    max_pixel_value=255.0
-                ),
-                ToTensorV2()
-            ]
-
-        return A.Compose(transform_list)
+            return A.Compose(aug + base)
+        return A.Compose(base)
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        # Carregar imagem
         img_path = os.path.join(self.images_dir, self.images[idx])
-        image = Image.open(img_path).convert("RGB")
-        image = np.array(image)  # Albumentations trabalha com numpy arrays
+        image = self._read_image_selected(img_path)
 
         if self.masks is not None:
-            # Carregar máscara
             mask_path = os.path.join(self.masks_dir, self.masks[idx])
-            mask = Image.open(mask_path).convert("L")
-            mask = np.array(mask)  # Converter para numpy array
-            
-            # Aplicar transformações em imagem e máscara simultaneamente
+            mask = np.array(Image.open(mask_path).convert("L"))
             transformed = self.transform(image=image, mask=mask)
             image = transformed['image']
             mask = transformed['mask']
-            
-            # Converter máscara para formato binário (0 ou 1)
-            mask = (mask > 0.5).float().unsqueeze(0)  # Adicionar dimensão de canal
-            
+            mask = (mask > 0.5).float().unsqueeze(0)
             return image, mask
         else:
-            # Apenas imagem (para inferência)
-            # Criar transform sem máscara usando as estatísticas calculadas
-            image_only_transform = A.Compose([
-                A.Normalize(
-                    mean=self.mean,
-                    std=self.std,
-                    max_pixel_value=255.0
-                ),
+            transformed = A.Compose([
+                A.Normalize(mean=self.mean, std=self.std, max_pixel_value=255.0),
                 ToTensorV2()
-            ])
-            
-            transformed = image_only_transform(image=image)
+            ])(image=image)
             image = transformed['image']
-            
             return image, self.images[idx]
 
 
-# Função auxiliar para criar transforms customizados
 def get_training_transforms(mean, std):
-    """
-    Criar transformações de treinamento customizadas
-    
-    Args:
-        mean: lista com médias por canal [R, G, B]
-        std: lista com desvios padrão por canal [R, G, B]
-    """
-    transform_list = [
-        # Augmentations geométricas
+    return A.Compose([
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
-        
-        # Augmentations de cor
-        A.RandomBrightnessContrast(
-            brightness_limit=0.3,
-            contrast_limit=0.3,
-            p=0.6
-        ),
-        A.HueSaturationValue(
-            hue_shift_limit=20,
-            sat_shift_limit=30,
-            val_shift_limit=20,
-            p=0.4
-        ),
-        
-        # Normalização com estatísticas do dataset
-        A.Normalize(
-            mean=mean,
-            std=std,
-            max_pixel_value=255.0
-        ),
-        
-        # Converter para tensor
+        A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.6),
+        A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.4),
+        A.Normalize(mean=mean, std=std, max_pixel_value=255.0),
         ToTensorV2()
-    ]
-    
-    return A.Compose(transform_list)
-
+    ])
 
 def get_validation_transforms(mean, std):
-    """
-    Criar transformações de validação (sem augmentations)
-    
-    Args:
-        mean: lista com médias por canal [R, G, B]
-        std: lista com desvios padrão por canal [R, G, B]
-    """
-    transform_list = [
-        # Apenas normalização
-        A.Normalize(
-            mean=mean,
-            std=std,
-            max_pixel_value=255.0
-        ),
-        
-        # Converter para tensor
+    return A.Compose([
+        A.Normalize(mean=mean, std=std, max_pixel_value=255.0),
         ToTensorV2()
-    ]
-    
-    return A.Compose(transform_list)
+    ])
 
-
-# Exemplo de uso:
 if __name__ == "__main__":
-    # Dataset para treinamento com augmentations padrão
-    train_dataset = RoadIntersectionDataset(
+    '''
+    Exemplos de uso:
+      - RGB (3 canais): instancie sua UNet com in_channels=3.
+      - RGB+NIR (4 canais): instancie sua UNet com in_channels=4.  (A UNet suporta in_channels variável.)  # :contentReference[oaicite:0]{index=0}
+    '''
+    # RGB (sem NIR)
+    train_rgb = RoadIntersectionDataset(
         images_dir="dataset/train/images",
         masks_dir="dataset/train/masks",
-        is_training=True
+        is_training=True,
+        bands_mode="rgb"
     )
-    
-    # Dataset para validação sem augmentations
-    val_dataset = RoadIntersectionDataset(
-        images_dir="dataset/val/images", 
+    val_rgb = RoadIntersectionDataset(
+        images_dir="dataset/val/images",
         masks_dir="dataset/val/masks",
-        is_training=False
+        is_training=False,
+        bands_mode="rgb"
     )
-    
-    # Dataset com transforms customizados (usando estatísticas do dataset de treino)
-    custom_train_transforms = get_training_transforms(
-        mean=train_dataset.mean, 
-        std=train_dataset.std
-    )
-    custom_train_dataset = RoadIntersectionDataset(
+    print(f"[RGB] Train={len(train_rgb)}  Val={len(val_rgb)}  mean={train_rgb.mean}  std={train_rgb.std}")
+
+    # RGB+NIR
+    train_rgbnir = RoadIntersectionDataset(
         images_dir="dataset/train/images",
-        masks_dir="dataset/train/masks", 
-        transform=custom_train_transforms
+        masks_dir="dataset/train/masks",
+        is_training=True,
+        bands_mode="rgbnir"
     )
-    
-    print(f"Train dataset: {len(train_dataset)} amostras")
-    print(f"Val dataset: {len(val_dataset)} amostras")
-    print(f"Média calculada: {train_dataset.mean}")
-    print(f"Desvio padrão calculado: {train_dataset.std}")
-    
-    # Testar uma amostra
-    image, mask = train_dataset[0]
-    print(f"Forma da imagem: {image.shape}")
-    print(f"Forma da máscara: {mask.shape}")
-    print(f"Valores únicos na máscara: {torch.unique(mask)}")
-    print(f"Range da imagem normalizada: [{image.min():.3f}, {image.max():.3f}]")
+    val_rgbnir = RoadIntersectionDataset(
+        images_dir="dataset/val/images",
+        masks_dir="dataset/val/masks",
+        is_training=False,
+        bands_mode="rgbnir"
+    )
+    print(f"[RGBNIR] Train={len(train_rgbnir)}  Val={len(val_rgbnir)}  mean={train_rgbnir.mean}  std={train_rgbnir.std}")
