@@ -19,7 +19,7 @@ ARCH = "custom"         # "custom" (sua UNet - padrão) ou "smp_unet" (se tiver)
 
 def build_model(arch: str, in_ch: int):
     if arch == "custom":
-        return UNet(in_channels=in_ch, out_channels=1).to(DEVICE) variável
+        return UNet(in_channels=in_ch, out_channels=1).to(DEVICE)
     elif arch == "smp_unet":
         try:
             import segmentation_models_pytorch as smp
