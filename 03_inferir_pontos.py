@@ -58,15 +58,15 @@ def adapt_first_conv_if_needed(model, checkpoint_state):
 
 def inferir_modelo(model, dataloader, device, threshold):
     model.eval()
-    output, nomes = [], []
-    with torch.no_grad():
+    out, nomes = [], []
+    with torch.inference_mode(), torch.amp.autocast('cuda', enabled=(device.type=='cuda')):
         for imgs, nomes_patches in tqdm(dataloader, desc='Inferindo', leave=False):
-            imgs = imgs.to(device)
-            saida = torch.sigmoid(model(imgs))
-            preds = (saida > threshold).float()
-            output.append(preds.cpu().numpy())
+            imgs = imgs.to(device, non_blocking=True)
+            probs = torch.sigmoid(model(imgs))
+            preds = (probs > threshold).to(torch.uint8)
+            out.append(preds.cpu().numpy())
             nomes.extend(nomes_patches)
-    return output, nomes
+    return out, nomes
 
 def extrair_pontos(preds_binarias, nomes_patches, pasta_imagens):
     dados = []

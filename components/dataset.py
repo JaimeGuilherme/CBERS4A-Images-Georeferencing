@@ -76,7 +76,8 @@ class RoadIntersectionDataset(Dataset):
         for img_name in tqdm(self.images, desc="Calculando estatísticas"):
             img_path = os.path.join(self.images_dir, img_name)
             try:
-                image = self._read_image_selected(img_path)
+                image = self._read_image_selected(img_path).astype(np.float32) / 255.0
+
             except Exception:
                 continue
             H, W, C = image.shape

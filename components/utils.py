@@ -1,6 +1,7 @@
 import torch, os
 
-def save_model(model, path, optimizer=None, epoch=None, best_iou=None, best_threshold=None):
+def save_model(model, path, optimizer=None, epoch=None,
+               best_iou=None, best_threshold=None, best_val_loss=None):
     checkpoint = {
         'model_state_dict': model.state_dict()
     }
@@ -12,8 +13,11 @@ def save_model(model, path, optimizer=None, epoch=None, best_iou=None, best_thre
         checkpoint['best_iou'] = best_iou
     if best_threshold is not None:
         checkpoint['best_threshold'] = best_threshold
+    if best_val_loss is not None:
+        checkpoint['best_val_loss'] = best_val_loss
 
     torch.save(checkpoint, path)
+
 
 def load_checkpoint(caminho, model, optimizer=None):
     if not os.path.exists(caminho):
@@ -29,6 +33,7 @@ def load_checkpoint(caminho, model, optimizer=None):
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
     return checkpoint
+
 
 def load_checkpoint_raw(caminho, map_location='cpu'):
     if not os.path.exists(caminho):

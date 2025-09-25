@@ -104,21 +104,30 @@ def separar_patches(patches_dir, output_dir, train_pct=0.6, val_pct=0.3, test_pc
 
 def selecionar_bandas(patch, prefer='all'):
     C, H, W = patch.shape
+
+    def take_n(n):
+        if C >= n:
+            return patch[:n, :, :]
+        out = np.zeros((n, H, W), dtype=patch.dtype)
+        out[:C, :, :] = patch
+        return out
+
     if isinstance(prefer, (list, tuple)):
-        idx = [i-1 for i in prefer if 1 <= i <= C]
+        idx = [i - 1 for i in prefer if 1 <= i <= C]
         if not idx:
             idx = list(range(min(3, C)))
-        sel = patch[idx, :, :]
-    elif prefer == 'all':
-        sel = patch
-    else:
-        if C >= 3:
-            sel = patch[:3, :, :]
-        elif C == 1:
-            sel = np.repeat(patch, 3, axis=0)
-        else:
-            sel = np.concatenate([patch, patch[:1]], axis=0)
-    return sel
+        return patch[idx, :, :]
+
+    if isinstance(prefer, str):
+        key = prefer.strip().lower()
+        if key in ('all', '*'):
+            return patch
+        if key in ('rgb',):
+            return take_n(3)
+        if key in ('rgbnir', 'rgba', 'nirrgb'):
+            return take_n(4)
+
+    return take_n(3)
 
 
 def gerar_patches_multiplas_imagens(
