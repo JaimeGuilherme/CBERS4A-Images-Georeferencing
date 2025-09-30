@@ -26,7 +26,7 @@ from components.losses import FocalLoss
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 BANDS_MODE = "rgbnir"      # "rgbnir" (padrão) ou "rgb"
-ARCH = "custom"            # "custom" (sua UNet) ou "smp_unet"
+ARCH = "smp_unet"            # "custom" (sua UNet) ou "smp_unet"
 
 def buscar_melhor_threshold(model, val_loader, device, thresholds=np.linspace(0.1, 0.9, 17)):
     model.eval()
@@ -112,21 +112,21 @@ def adapt_first_conv_if_needed(model, checkpoint_state):
     model.load_state_dict(state, strict=False)
 
 if __name__ == "__main__":
-    caminho_train_img = "dataset_separated/train/images"
-    caminho_train_mask = "dataset_separated/train/masks"
+    caminho_train_img = "dataset_mini/train/images"
+    caminho_train_mask = "dataset_mini/train/masks"
 
-    caminho_val_img = "dataset_separated/val/images"
-    caminho_val_mask = "dataset_separated/val/masks"
+    caminho_val_img = "dataset_mini/val/images"
+    caminho_val_mask = "dataset_mini/val/masks"
 
-    caminho_test_img = "dataset_separated/test/images"
-    caminho_test_mask = "dataset_separated/test/masks"
+    caminho_test_img = "dataset_mini/test/images"
+    caminho_test_mask = "dataset_mini/test/masks"
 
     caminho_checkpoint = "checkpoints"
-    epocas = 200
+    epocas = 1000
     batch = 64
     lr = 1e-4
     weight_decay = 1e-2
-    salvar_checkpoint_a_cada = 5
+    salvar_checkpoint_a_cada = 50
 
     swa_start_epoch = 50
     swa_lr = 1e-5

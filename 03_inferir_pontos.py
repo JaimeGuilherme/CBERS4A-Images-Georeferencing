@@ -1,4 +1,3 @@
-# 03_inferir_pontos.py
 import os, torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -7,6 +6,9 @@ from shapely.geometry import Point
 import geopandas as gpd
 from scipy.ndimage import label, center_of_mass
 import rasterio
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from functools import partial
+import multiprocessing as mp
 
 from components.dataset import RoadIntersectionDataset
 from components.unet import UNet
@@ -15,7 +17,12 @@ from components.utils import load_checkpoint_raw
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 BANDS_MODE = "rgbnir"   # "rgbnir" (padrão, 4 canais) ou "rgb" (3 canais)
-ARCH = "custom"         # "custom" (sua UNet - padrão) ou "smp_unet" (se tiver)
+ARCH = "smp_unet"       # "custom" (sua UNet - padrão) ou "smp_unet" (se tiver)
+
+# === CONFIGURAÇÕES DE PARALELIZAÇÃO ===
+NUM_WORKERS_DATALOADER = 4  # Para carregar dados em paralelo
+NUM_WORKERS_SAVE = 8        # Para salvar máscaras em paralelo (I/O)
+NUM_WORKERS_EXTRACT = mp.cpu_count()  # Para extrair pontos (CPU-bound)
 
 def build_model(arch: str, in_ch: int):
     if arch == "custom":
@@ -58,47 +65,116 @@ def adapt_first_conv_if_needed(model, checkpoint_state):
 
 def inferir_modelo(model, dataloader, device, threshold):
     model.eval()
-    out, nomes = [], []
-    with torch.inference_mode(), torch.amp.autocast('cuda', enabled=(device.type=='cuda')):
+    output, nomes = [], []
+    with torch.no_grad():
         for imgs, nomes_patches in tqdm(dataloader, desc='Inferindo', leave=False):
-            imgs = imgs.to(device, non_blocking=True)
-            probs = torch.sigmoid(model(imgs))
-            preds = (probs > threshold).to(torch.uint8)
-            out.append(preds.cpu().numpy())
+            imgs = imgs.to(device)
+            saida = torch.sigmoid(model(imgs))  # (B, 1, H, W)
+            preds = (saida > threshold).float().cpu().numpy()
+            for i in range(preds.shape[0]):
+                mask = preds[i].squeeze()  # garante (H, W)
+                output.append(mask)
             nomes.extend(nomes_patches)
-    return out, nomes
+    return output, nomes
 
-def extrair_pontos(preds_binarias, nomes_patches, pasta_imagens):
-    dados = []
-    for pred, nome_patch in tqdm(zip(preds_binarias, nomes_patches),
-                                 desc="Extraindo pontos",
-                                 total=len(nomes_patches)):
-        mask = pred.squeeze().astype(np.uint8)
-        labeled, num_features = label(mask)
-        if num_features == 0:
+def salvar_mascara_worker(args):
+    """Worker para salvar uma única máscara (paralelizável)"""
+    pred, nome_patch, caminho_test_img, pasta_saida_mascaras = args
+    
+    mask_patch = pred.squeeze().astype(np.uint8) * 255
+    if mask_patch.ndim != 2:
+        raise ValueError(f"Máscara com dimensões inesperadas: {mask_patch.shape}")
+
+    patch_path = os.path.join(caminho_test_img, nome_patch)
+    with rasterio.open(patch_path) as src:
+        meta = src.meta.copy()
+    
+    meta.update({'count': 1, 'dtype': mask_patch.dtype, 'driver': 'GTiff'})
+    saida_patch = os.path.join(pasta_saida_mascaras, f'mask_{nome_patch}')
+    
+    with rasterio.open(saida_patch, 'w', **meta) as dst:
+        dst.write(mask_patch, 1)
+    
+    return nome_patch
+
+def salvar_mascaras_paralelo(output_bin, nomes_patches, caminho_test_img, pasta_saida_mascaras, num_workers):
+    """Salva máscaras em paralelo usando ThreadPoolExecutor (I/O bound)"""
+    args_list = [(pred, nome, caminho_test_img, pasta_saida_mascaras) 
+                 for pred, nome in zip(output_bin, nomes_patches)]
+    
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        list(tqdm(executor.map(salvar_mascara_worker, args_list),
+                  total=len(args_list),
+                  desc="Salvando máscaras"))
+
+def extrair_pontos_worker(args):
+    """Worker para extrair pontos de uma única máscara (paralelizável)"""
+    pred, nome_patch, patch_path = args
+    
+    mask = pred.squeeze().astype(np.uint8)
+    if mask.ndim == 3:
+        mask = mask[0]  # garante 2D
+
+    labeled, num_features = label(mask)
+    if num_features == 0:
+        return []
+
+    centros = center_of_mass(mask, labeled, range(1, num_features + 1))
+    
+    # Abre o raster para pegar transform e CRS
+    with rasterio.open(patch_path) as src:
+        patch_transform = src.transform
+        crs = src.crs
+    
+    dados_patch = []
+    for centro in centros:
+        if len(centro) == 2:
+            y, x = centro
+        elif len(centro) == 3:
+            _, y, x = centro
+        else:
             continue
-        centros = center_of_mass(mask, labeled, range(1, num_features + 1))
-        patch_path = os.path.join(pasta_imagens, nome_patch)
-        with rasterio.open(patch_path) as src:
-            patch_transform = src.transform
-            crs = src.crs
-        for y, x in centros:
-            lon, lat = rasterio.transform.xy(patch_transform, int(round(y)), int(round(x)))
-            dados.append({
-                'geometry': Point(lon, lat),
-                'patch': nome_patch,
-                'x_pixel': int(round(x)),
-                'y_pixel': int(round(y))
-            })
-    gdf = gpd.GeoDataFrame(dados)
-    if len(dados) > 0:
-        gdf.set_crs(crs, inplace=True)
+
+        lon, lat = rasterio.transform.xy(patch_transform, int(round(y)), int(round(x)))
+        dados_patch.append({
+            'geometry': Point(lon, lat),
+            'patch': nome_patch,
+            'x_pixel': int(round(x)),
+            'y_pixel': int(round(y)),
+            'crs': crs
+        })
+    
+    return dados_patch
+
+def extrair_pontos_paralelo(preds_binarias, nomes_patches, pasta_imagens, num_workers):
+    """Extrai pontos em paralelo usando ProcessPoolExecutor (CPU bound)"""
+    patch_paths = [os.path.join(pasta_imagens, nome) for nome in nomes_patches]
+    args_list = list(zip(preds_binarias, nomes_patches, patch_paths))
+    
+    todos_dados = []
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        results = list(tqdm(executor.map(extrair_pontos_worker, args_list),
+                           total=len(args_list),
+                           desc="Extraindo pontos"))
+        
+        for dados in results:
+            todos_dados.extend(dados)
+    
+    if not todos_dados:
+        return gpd.GeoDataFrame()
+    
+    # Extrai CRS do primeiro ponto (todos devem ter o mesmo)
+    crs = todos_dados[0].pop('crs')
+    
+    gdf = gpd.GeoDataFrame(todos_dados)
+    gdf.set_crs(crs, inplace=True)
+    
     return gdf
 
 if __name__ == '__main__':
     caminho_modelo = 'checkpoints/best_model.pth'
     caminho_test_img = 'dataset_separated/test/images'
-    batch_size = 1
+    batch_size = 64
     caminho_saida_geojson = 'output/pontos_detectados.geojson'
     pasta_saida_mascaras = 'output/mascaras_patches'
 
@@ -107,6 +183,10 @@ if __name__ == '__main__':
 
     in_ch = 3 if BANDS_MODE == "rgb" else 4
     print('Carregando modelo:', caminho_modelo)
+    print(f'Usando {NUM_WORKERS_DATALOADER} workers para DataLoader')
+    print(f'Usando {NUM_WORKERS_SAVE} workers para salvar máscaras')
+    print(f'Usando {NUM_WORKERS_EXTRACT} workers para extrair pontos')
+    
     model = build_model(ARCH, in_ch)
     checkpoint = load_checkpoint_raw(caminho_modelo, map_location=DEVICE)
     adapt_first_conv_if_needed(model, checkpoint)
@@ -114,32 +194,34 @@ if __name__ == '__main__':
     threshold = checkpoint.get('best_threshold', 0.5)
     print(f'Usando threshold: {threshold}')
 
+    # DataLoader com num_workers para carregar dados em paralelo
     test_dataset = RoadIntersectionDataset(
         caminho_test_img, masks_dir=None, transform=None, is_training=False, bands_mode=BANDS_MODE
     )
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=batch_size, 
+        shuffle=False,
+        num_workers=NUM_WORKERS_DATALOADER,
+        pin_memory=True if torch.cuda.is_available() else False
+    )
 
+    print('\n=== INFERÊNCIA ===')
     output_bin, nomes_patches = inferir_modelo(model, test_loader, DEVICE, threshold)
 
-    for pred, nome_patch in tqdm(zip(output_bin, nomes_patches),
-                                 total=len(nomes_patches),
-                                 desc="Salvando máscaras"):
-        mask_patch = (pred[0, 0] > 0).astype(np.uint8) * 255
-        patch_path = os.path.join(caminho_test_img, nome_patch)
-        with rasterio.open(patch_path) as src:
-            meta = src.meta.copy()
-        meta.update({'count': 1, 'dtype': mask_patch.dtype, 'driver': 'GTiff'})
-        saida_patch = os.path.join(pasta_saida_mascaras, f'mask_{nome_patch}')
-        with rasterio.open(saida_patch, 'w', **meta) as dst:
-            dst.write(mask_patch, 1)
+    print('\n=== SALVANDO MÁSCARAS EM PARALELO ===')
+    salvar_mascaras_paralelo(output_bin, nomes_patches, caminho_test_img, 
+                             pasta_saida_mascaras, NUM_WORKERS_SAVE)
 
-    gdf_pontos = extrair_pontos(output_bin, nomes_patches, caminho_test_img)
+    print('\n=== EXTRAINDO PONTOS EM PARALELO ===')
+    gdf_pontos = extrair_pontos_paralelo(output_bin, nomes_patches, 
+                                         caminho_test_img, NUM_WORKERS_EXTRACT)
 
     if not gdf_pontos.empty:
         gdf_pontos.to_file(caminho_saida_geojson, driver='GeoJSON')
-        print(f'Pontos detectados salvos em: {caminho_saida_geojson}')
+        print(f'\nPontos detectados salvos em: {caminho_saida_geojson}')
     else:
-        print('Nenhum ponto detectado para salvar.')
+        print('\nNenhum ponto detectado para salvar.')
 
     print(f'Máscaras salvas em: {pasta_saida_mascaras}')
     print(f'Total de pontos detectados: {len(gdf_pontos)}')
