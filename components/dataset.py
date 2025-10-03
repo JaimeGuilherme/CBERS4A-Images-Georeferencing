@@ -9,11 +9,9 @@ from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
 
 class RoadIntersectionDataset(Dataset):
-    '''
-    bands_mode:
-      - "rgb"    → 3 canais (R,G,B). Se houver 4 bandas, descarta NIR.
-      - "rgbnir" → 4 canais (R,G,B,NIR). Se houver só 3, adiciona NIR vazio.
-    '''
+    #bands_mode:
+    #  - "rgb"    → 3 canais (R,G,B). Se houver 4 bandas, descarta NIR.
+    #  - "rgbnir" → 4 canais (R,G,B,NIR). Se houver só 3, adiciona NIR vazio.
     def __init__(self, images_dir, masks_dir=None, transform=None, is_training=False, bands_mode="rgb"):
         assert bands_mode in ("rgb", "rgbnir")
         self.images_dir = images_dir
@@ -67,9 +65,6 @@ class RoadIntersectionDataset(Dataset):
         return self._select_bands(hwc)
 
     def _calculate_dataset_stats(self):
-        '''
-        Estatísticas por canal após a seleção de bandas (3 ou 4).
-        '''
         sums = None
         sums2 = None
         count = 0
@@ -151,11 +146,9 @@ def get_validation_transforms(mean, std):
     ])
 
 if __name__ == "__main__":
-    '''
-    Exemplos de uso:
-      - RGB (3 canais): instancie sua UNet com in_channels=3.
-      - RGB+NIR (4 canais): instancie sua UNet com in_channels=4.  (A UNet suporta in_channels variável.)
-    '''
+    #Exemplos de uso:
+    #  - RGB (3 canais): instancie sua UNet com in_channels=3.
+    #  - RGB+NIR (4 canais): instancie sua UNet com in_channels=4.  (A UNet suporta #in_channels variável.)
     train_rgb = RoadIntersectionDataset(
         images_dir="dataset/train/images",
         masks_dir="dataset/train/masks",

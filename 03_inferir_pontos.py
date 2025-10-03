@@ -37,10 +37,6 @@ def build_model(arch: str, in_ch: int):
         raise ValueError(f"ARCH inválido: {arch}")
 
 def adapt_first_conv_if_needed(model, checkpoint_state):
-    '''
-    Ajusta a 1ª conv se o checkpoint foi treinado com 3 canais e o modelo atual tem 4 (ou vice-versa).
-    Mesma lógica usada no treino.
-    '''
     state = checkpoint_state.get('model_state_dict', checkpoint_state)
     model_state = model.state_dict()
     possible_keys = [k for k in model_state.keys() if k.endswith("weight") and model_state[k].dim() == 4]
