@@ -1,4 +1,4 @@
-# clean_intersec.py
+# 00_clean_intersec.py
 
 from qgis.PyQt.QtCore import QCoreApplication, QVariant
 from qgis.core import (

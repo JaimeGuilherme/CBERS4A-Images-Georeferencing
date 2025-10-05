@@ -2,14 +2,14 @@
 # -----------------------------------------------------------------------------
 # Execução: python 05_script_georref.py
 # Estrutura esperada:
-#   ./input/
+#   ./main_input/
 #       imagem.tif (ou .tiff)
 #       cruzamentos.gpkg
 #       modelo.pth
 # Saídas:
-#   ./output/pontos_inferidos.gpkg
-#   ./output/georeferencer.points
-#   ./output/pares_homologos.geojson (opcional, auditoria)
+#   ./main_output/pontos_inferidos.gpkg
+#   ./main_output/georeferencer.points
+#   ./main_output/pares_homologos.geojson (opcional, auditoria)
 # -----------------------------------------------------------------------------
 
 import os
@@ -58,25 +58,25 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # =========================
 #   Descoberta de arquivos
 # =========================
-def achar_entrada(pasta_input="input"):
-    if not os.path.isdir(pasta_input):
-        raise FileNotFoundError(f"Pasta '{pasta_input}' não encontrada.")
+def achar_entrada(pasta_main_input="main_input"):
+    if not os.path.isdir(pasta_main_input):
+        raise FileNotFoundError(f"Pasta '{pasta_main_input}' não encontrada.")
     # geotiff
-    tif_list = sorted(glob.glob(os.path.join(pasta_input, "*.tif")) + glob.glob(os.path.join(pasta_input, "*.tiff")))
+    tif_list = sorted(glob.glob(os.path.join(pasta_main_input, "*.tif")) + glob.glob(os.path.join(pasta_main_input, "*.tiff")))
     if not tif_list:
-        raise FileNotFoundError("Nenhuma imagem GeoTIFF (.tif/.tiff) encontrada em ./input/")
+        raise FileNotFoundError("Nenhuma imagem GeoTIFF (.tif/.tiff) encontrada em ./main_input/")
     imagem = tif_list[0]
 
     # gpkg
-    gpkg_list = sorted(glob.glob(os.path.join(pasta_input, "*.gpkg")))
+    gpkg_list = sorted(glob.glob(os.path.join(pasta_main_input, "*.gpkg")))
     if not gpkg_list:
-        raise FileNotFoundError("Nenhum GPKG encontrado em ./input/")
+        raise FileNotFoundError("Nenhum GPKG encontrado em ./main_input/")
     gpkg = gpkg_list[0]
 
     # pth
-    pth_list = sorted(glob.glob(os.path.join(pasta_input, "*.pth")))
+    pth_list = sorted(glob.glob(os.path.join(pasta_main_input, "*.pth")))
     if not pth_list:
-        raise FileNotFoundError("Nenhum checkpoint .pth encontrado em ./input/")
+        raise FileNotFoundError("Nenhum checkpoint .pth encontrado em ./main_input/")
     modelo = pth_list[0]
 
     return imagem, gpkg, modelo
@@ -305,9 +305,9 @@ def hungarian_match_per_tile(det_xy: np.ndarray, ref_xy: np.ndarray, assign_radi
                 dists.append(d)
     return det_idxs, ref_idxs, dists
 
-def escrever_points_qgis(pares, output_dir, nome="georeferencer.points"):
-    os.makedirs(output_dir, exist_ok=True)
-    fpath = os.path.join(output_dir, nome)
+def escrever_points_qgis(pares, main_output_dir, nome="georeferencer.points"):
+    os.makedirs(main_output_dir, exist_ok=True)
+    fpath = os.path.join(main_output_dir, nome)
     with open(fpath, "w", encoding="utf-8") as f:
         for row in pares:
             # mapX,mapY,pixelX,pixelY,enable
@@ -329,9 +329,9 @@ def pick_metric_crs(gdf_base: gpd.GeoDataFrame):
 # =========================
 def main():
     # 0) entradas
-    imagem_path, gpkg_path, modelo_path = achar_entrada("input")
-    os.makedirs("output", exist_ok=True)
-    patches_dir = os.path.join("output", "patches")
+    imagem_path, gpkg_path, modelo_path = achar_entrada("main_input")
+    os.makedirs("main_output", exist_ok=True)
+    patches_dir = os.path.join("main_output", "patches")
     os.makedirs(patches_dir, exist_ok=True)
 
     print(f"🛰️ Imagem: {imagem_path}")
@@ -353,7 +353,7 @@ def main():
 
     # 3) inferência
     gdf_inferidos = inferir_pontos_de_patches(patches_dir, modelo_path, bands_mode="rgbnir", batch_size=16)
-    inferidos_gpkg = os.path.join("output", "pontos_inferidos.gpkg")
+    inferidos_gpkg = os.path.join("main_output", "pontos_inferidos.gpkg")
     if len(gdf_inferidos):
         gdf_inferidos.to_file(inferidos_gpkg, driver="GPKG")
     print(f"✅ Pontos inferidos: {len(gdf_inferidos)} | salvo em: {inferidos_gpkg}")
@@ -392,7 +392,7 @@ def main():
                 "pixelY": float(py),
             })
 
-    points_path = escrever_points_qgis(pares_points, "output", "georeferencer.points")
+    points_path = escrever_points_qgis(pares_points, "main_output", "georeferencer.points")
     print(f"📍 Arquivo .points: {points_path} | pares: {len(pares_points)}")
 
     # arquivo de auditoria (opcional): pares_homologos.geojson com pontos detectados
@@ -407,7 +407,7 @@ def main():
             })
         if pares_geo:
             gpd.GeoDataFrame(pares_geo, geometry="geometry", crs=gdf_inferidos.crs).to_file(
-                os.path.join("output", "pares_homologos.geojson"), driver="GeoJSON"
+                os.path.join("main_output", "pares_homologos.geojson"), driver="GeoJSON"
             )
     except Exception:
         pass

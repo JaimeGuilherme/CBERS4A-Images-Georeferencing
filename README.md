@@ -13,6 +13,12 @@ Usa **U-Net (CNN)** para segmentação binária das interseções, extrai pontos
 
 ## 🧭 Visão Geral do Pipeline
 
+### 0. 🧹 Limpeza/filtragem de interseções (QGIS)
+
+Antes de qualquer coisa, limpe os falsos positivos dos pontos de interseção (ex.: *Line Intersections*) com o **Script 00** (algoritmo do QGIS). Ele remove quebras de linha colineares/mesma via, sinaliza ângulos obtusos e pode **quebrar** as linhas nas interseções válidas.
+
+> Detalhes e uso: ver seção **“00_clean_intersec.py (QGIS)”** mais abaixo.
+
 ### 1. Aquisição e Preparo dos Dados
 
 O diagrama abaixo mostra o fluxo de aquisição das imagens CBERS-4A e dos vetores OSM, passando pelo pré-processamento no QGIS até a organização final em pastas.
@@ -59,7 +65,7 @@ flowchart LR
     B --> C["02_treinar_unet.py<br/>Treino U-Net + métricas + best_model.pth"]
     C --> D["03_inferir_pontos.py<br/>Inferência em test → máscaras + pontos"]
     D --> E["04_associar_pontos.py<br/>NN/raio → pares_homologos.geojson"]
-    E --> F["05_plugin_georref.py (QGIS)<br/>Georreferenciamento a partir dos pares"]
+    E --> F["05_script_georref.py (QGIS)<br/>Georreferenciamento a partir dos pares"]
 ```
 
 ---
@@ -69,7 +75,8 @@ flowchart LR
 Apenas as pastas **components** e **input** são necessárias e com os arquivos já colocados. As demais vão sendo geradas conforme os scripts vão sendo executados
 
 ```
-┌── 01_preparar_dataset.py # Script para preparar o dataset
+┌── 00_clean_intersec.py # (QGIS) Limpa interseções, flags e (opção) quebrar linhas
+├── 01_preparar_dataset.py # Script para preparar o dataset
 ├── 02_treinar_unet.py # Script de treinamento da U-Net
 ├── 03_inferir_pontos.py # Script para inferência e geração de pontos
 ├── 04_associar_pontos.py # Script para associar pontos detectados com OSM
@@ -95,8 +102,8 @@ Apenas as pastas **components** e **input** são necessárias e com os arquivos 
 │ │ ├── images/ # Imagens de validação
 │ │ └── masks/ # Máscaras de validação
 │ ├── test/
-│ ├── images/ # Imagens de teste
-│ └── masks/ # Máscaras de teste
+│   ├── images/ # Imagens de teste
+│   └── masks/ # Máscaras de teste
 │
 ├── dataset_patches/ # Patches gerados a partir das imagens originais
 │ ├── images/ # Pedaços (patches) das imagens
@@ -115,7 +122,7 @@ Apenas as pastas **components** e **input** são necessárias e com os arquivos 
 │
 ├── temp_patches/ # Pasta para os arquivos temporários
 │
-├── main_output/ # Resultados sobre teste (pontos homólogos em GeoJSON para aplicar no georreferenciador do QGIS)
+├── main_output/ # Resultados sobre o main_input (pontos homólogos em GeoJSON para aplicar no georreferenciador do QGIS)
 │ └── mascaras_patches/ # Imagens das máscaras inferidas
 │
 └── README.md
@@ -162,6 +169,7 @@ Antes de iniciar o pipeline (🚀 Como Usar), é necessário preparar o **datase
   1. Fizemos um **recorte dos vetores** (linhas) usando um polígono temporário desenhado sobre a imagem CBERS-4A — garantindo que apenas rodovias dentro da área da imagem fossem mantidas.  
   2. Esse recorte reduz a complexidade e **facilita o geoprocessamento**.  
 
+### caso não queira rodar o script `00_clean_intersec.py` ou ele esteja com problemas, pode seguir a solução abaixo
 ### 🔹 Conversão de Linhas em Pontos de Interseção
 Para identificar os **cruzamentos rodoviários**:
 
@@ -182,7 +190,7 @@ Para identificar os **cruzamentos rodoviários**:
 
    outputPointList = []
    for geomKey, idSet in endPointDict.items():
-       if len(idSet) < 3:  # cruzamento detectado
+       if len(idSet) < 3:
            continue
        newGeom = QgsGeometry()
        newGeom.fromWkb(geomKey)
@@ -226,7 +234,51 @@ Essas pastas serão utilizadas diretamente no script **01_preparar_dataset.py** 
 
 Aqui está o fluxo completo do pipeline, com a explicação detalhada de cada script:
 
-### 1) Preparar dataset — `01_preparar_dataset.py`
+### 0. 🧹 Limpar interseções (QGIS) — `00_clean_intersec.py`
+
+**O que faz:**  
+- Filtra falsos positivos dos pontos de *Line Intersections* (p.ex., quebras colineares/mesma via).  
+- Gera **flags** por ponto:
+  - `n_lines`: quantas linhas tocam o ponto;
+  - `ang_deg`: ângulo entre duas linhas (quando aplicável);
+  - `is_obtuse`: 1 se ângulo ≥ `ANG_FLAG_DEG` (padrão 90°);
+  - `same_way`: 1 se as duas linhas parecem ser a mesma via (heurística por `osm_id` ou `name/ref`).
+- **Opcional:** quebrar as linhas exatamente nos pontos válidos.
+
+**Parâmetros principais:**
+- `TOLERANCE (m)`: tolerância espacial (padrão 0.75 m).
+- `ANG_TOL (graus)`: tolerância para colinearidade (padrão 12°).
+- `ANG_FLAG_DEG (graus)`: ângulo para marcar `is_obtuse` (padrão 90°).
+- `DROP_SAME_WAY (bool)`: descartar pontos que são continuidade da mesma via (padrão `True`).
+- `DO_SPLIT (bool)`: quebrar as linhas nos pontos válidos (padrão `True`).
+
+**Entradas:**  
+- `INPUT_POINTS`: pontos de *Line Intersections* (ou vértices extremos).  
+- `INPUT_LINES`: linhas OSM já filtradas/recortadas.
+
+**Saídas:**  
+- `OUTPUT_POINTS`: **pontos limpos** com flags (use este GPKG no resto do pipeline).  
+- `OUTPUT_LINES`: linhas quebradas (se `DO_SPLIT=True`) ou cópia.
+
+#### ➕ Como instalar o Script 00 no QGIS (Toolbox do Processing)
+
+**Opção A — Add Script (mais rápido)**  
+1. Abra o **QGIS** → **Processing Toolbox**.  
+2. Clique com o botão direito em **Scripts** → **Add Script…**.  
+3. Selecione o arquivo `00_clean_intersec.py`.  
+4. O algoritmo aparecerá em **“PFC • Redes Viárias”**. Execute e configure os parâmetros.
+
+**Opção B — Editor Python do QGIS**  
+1. Abra **Plugins → Python → Editor Python**.  
+2. Cole o conteúdo de `00_clean_intersec.py`.  
+3. Salve em:  
+   - Windows: `%APPDATA%\QGIS\QGIS3\profiles\default\processing\scripts\`  
+   - Linux: `~/.local/share/QGIS/QGIS3/profiles/default/processing/scripts/`  
+4. Reinicie o QGIS (se necessário) e localize o script na Toolbox.
+
+> **Dica:** mantenha atributos como `osm_id`, `name`, `ref` nas linhas OSM — o script usa isso para identificar “mesma via”.
+
+### 1. Preparar dataset — `01_preparar_dataset.py`
 ```bash
 python 01_preparar_dataset.py
 ```
@@ -240,7 +292,7 @@ Este script:
 
 ---
 
-### 2) Treinar a U-Net — `02_treinar_unet.py`
+### 2. Treinar a U-Net — `02_treinar_unet.py`
 ```bash
 python 02_treinar_unet.py
 ```
@@ -257,7 +309,7 @@ Este script:
 
 ---
 
-### 3) Inferir pontos — `03_inferir_pontos.py`
+### 3. Inferir pontos — `03_inferir_pontos.py`
 ```bash
 python 03_inferir_pontos.py
 ```
@@ -270,7 +322,7 @@ Este script:
 
 ---
 
-### 4) Associar pontos com referência — `04_associar_pontos.py`
+### 4. Associar pontos com referência — `04_associar_pontos.py`
 ```bash
 python 04_associar_pontos.py
 ```
@@ -282,56 +334,50 @@ Este script:
 
 ---
 
-### 5) Georreferenciar no QGIS — `05_plugin_georref.py`
-Este script é usado como **plugin dentro do QGIS**. Ele:
-- Divide uma imagem alvo em patches nos locais de interesse.  
-- Roda a U-Net para detectar interseções nessa nova imagem.  
-- Extrai os pontos detectados.  
-- Associa automaticamente aos pontos de referência fornecidos.  
-- Gera os pares necessários para o **georreferenciamento da imagem no QGIS**.  
+### 5. Georreferenciamento automático para QGIS — `05_script_georref.py` (**Sem argumentos**)
 
-No QGIS, após rodar, é possível ajustar manualmente alguns pontos se necessário.
+**O que faz:**  
+- Roda **sem argumentos**: apenas `python 05_script_georref.py`.  
+- Procura automaticamente em `./input/`:
+  - **1 GeoTIFF** (`.tif` / `.tiff`);
+  - **1 GPKG** (pontos de cruzamentos **limpos** — saída do Script 00);
+  - **1 checkpoint** `.pth` (modelo treinado).
+- Gera patches **apenas onde há pontos de referência** (rápido), infere interseções com a U-Net, extrai centróides e:
+  - Salva **`output/pontos_inferidos.gpkg`** (CRS da imagem);
+  - Faz matching **Húngaro por tiles** entre *inferidos* ↔ *referência* (raio padrão **20 m**);
+  - Escreve **`output/georeferencer.points`** no formato do **Georreferenciador do QGIS**:  
+    `mapX,mapY,pixelX,pixelY,enable`;
+  - (Opcional) `output/pares_homologos.geojson` para auditoria.
 
----
-
-## 🧑‍💻 Exemplo de Código (usando `components/`)
-
-```python
-import torch
-from torch.utils.data import DataLoader
-
-from components.dataset import RoadIntersectionDataset
-from components.unet import UNet
-from components.losses import FocalLoss
-from components.utils import save_model
-from components.metrics import calculate_metrics
-
-# Dataset + DataLoader
-train_ds = RoadIntersectionDataset("dataset/train/images", "dataset/train/masks")
-train_loader = DataLoader(train_ds, batch_size=4, shuffle=True)
-
-# Modelo + Loss + Otimizador
-model = UNet(n_channels=3, n_classes=1)
-criterion = FocalLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-
-# Treino simples (exemplo)
-for epoch in range(2):
-    for images, masks in train_loader:
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, masks)
-        loss.backward()
-        optimizer.step()
-    print(f"Epoch {epoch+1} | Loss: {loss.item():.4f}")
-
-# Salvar checkpoint
-save_model(model, optimizer, epoch=2, path="checkpoints/example_model.pth")
-
-# Métricas
-metrics = calculate_metrics(outputs, masks)
-print(metrics)
+**Entrada esperada (Script 5):**
 ```
+./main_input/
+├── sua_imagem.tif         # GeoTIFF alvo
+├── seus_cruzamentos.gpkg  # Pontos limpos (saída do 00)
+└── best_model.pth         # Modelo treinado
+```
+
+**Saídas principais (Script 5):**
+```
+./main_output/
+├── pontos_inferidos.gpkg
+├── georeferencer.points   # use no QGIS Georeferencer
+└── pares_homologos.geojson (opcional)
+```
+
+#### 📄 Exemplo do formato `.points` (QGIS Georeferencer)
+
+Cada linha é um GCP: `mapX,mapY,pixelX,pixelY,enable`
+
+```text
+-48.123456,-15.987654,1024,768,1
+-48.121100,-15.984200,553,1201,1
+-48.119900,-15.982500,1780,340,1
+```
+
+- **mapX,mapY**: coordenadas do ponto **de referência** (no CRS da imagem).  
+- **pixelX,pixelY**: posição do ponto **na imagem** em **pixels** (origem no canto superior esquerdo).  
+- **enable**: 1 (ativo) ou 0 (ignorado).
 
 ---
 
