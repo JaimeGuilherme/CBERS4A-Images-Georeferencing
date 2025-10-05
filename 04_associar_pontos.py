@@ -1,4 +1,5 @@
 # 04_associar_pontos.py
+
 import os
 import math
 import pandas as pd

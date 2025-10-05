@@ -1,6 +1,4 @@
-# script para QGIS
-# Limpa pontos de interseção de linhas (Line Intersections OSM)
-# Gera flags de ângulo/continuidade e, opcionalmente, quebra as linhas
+# clean_intersec.py
 
 from qgis.PyQt.QtCore import QCoreApplication, QVariant
 from qgis.core import (
